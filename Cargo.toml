@@ -1,0 +1,36 @@
+[package]
+name = "sem"
+version = "0.1.0"
+authors = ["Arash Sal Moslehian <arashsm79@yahoo.com>"]
+edition = "2018"
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true # Symbols are nice and they don't increase the size on Flash
+opt-level = "z"
+
+[features]
+default = ["native"]
+native = ["esp-idf-sys/native"]
+
+[dependencies]
+anyhow = {version = "1", features = ["backtrace"]}
+log = "0.4"
+# esp-idf-sys = { version = "0.31", features = ["binstart"] }
+esp-idf-sys = { features = ["binstart"], git = "https://github.com/esp-rs/esp-idf-sys", rev = "7e1fc9186e7adc5b59eaeb13f2f6478068767a8c"}
+esp-idf-svc = { version = "0.42.1", features = ["experimental"]}
+esp-idf-hal = "0.38"
+embedded-svc = { version = "0.22", features = ["experimental"]}
+embedded-hal = "=1.0.0-alpha.8"
+embedded-hal-0-2-7 = { version = "0.2.7", package = "embedded-hal" }
+
+[patch.crates-io]
+embuild = { git = "https://github.com/esp-rs/embuild" }
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "7e1fc9186e7adc5b59eaeb13f2f6478068767a8c"}
+
+[build-dependencies]
+embuild = { git = "https://github.com/esp-rs/embuild" }
+anyhow = "1"
