@@ -16,21 +16,21 @@ opt-level = "z"
 default = ["native"]
 native = ["esp-idf-sys/native"]
 
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components"]
+bindings_header = "src/bindings.h"
+
 [dependencies]
 anyhow = {version = "1", features = ["backtrace"]}
 log = "0.4"
-# esp-idf-sys = { version = "0.31", features = ["binstart"] }
-esp-idf-sys = { features = ["binstart"], git = "https://github.com/esp-rs/esp-idf-sys", rev = "7e1fc9186e7adc5b59eaeb13f2f6478068767a8c"}
+esp-idf-sys = { version = "0.31.7", features = ["binstart"]}
 esp-idf-svc = { version = "0.42.1", features = ["experimental"]}
 esp-idf-hal = "0.38"
 embedded-svc = { version = "0.22", features = ["experimental"]}
 embedded-hal = "=1.0.0-alpha.8"
 embedded-hal-0-2-7 = { version = "0.2.7", package = "embedded-hal" }
-
-[patch.crates-io]
-embuild = { git = "https://github.com/esp-rs/embuild" }
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "7e1fc9186e7adc5b59eaeb13f2f6478068767a8c"}
+cstr = "0.2.10"
 
 [build-dependencies]
-embuild = { git = "https://github.com/esp-rs/embuild" }
+embuild = { version = "0.30.2"}
 anyhow = "1"

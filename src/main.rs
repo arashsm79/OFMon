@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -9,22 +10,23 @@ use embedded_svc::http::server::registry::Registry;
 use embedded_svc::http::server::{Request, Response};
 use embedded_svc::http::SendStatus;
 use embedded_svc::ipv4::{Ipv4Addr, Mask, RouterConfiguration, Subnet};
-use embedded_svc::storage::RawStorage;
 use embedded_svc::wifi::{
-    AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, ClientConfiguration, Status,
+    AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status,
 };
-use embedded_svc::wifi::{ClientConnectionStatus, ClientIpStatus, ClientStatus, Wifi};
+use embedded_svc::wifi::Wifi;
 use esp_idf_hal::prelude::Peripherals;
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::netif::EspNetifStack;
-use esp_idf_svc::nvs::{EspDefaultNvs, EspNvs};
-use esp_idf_svc::nvs_storage::EspNvsStorage;
+use esp_idf_svc::nvs::EspDefaultNvs;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_sys::esp;
-use log::{debug, error, info, warn};
-
 use esp_idf_hal::adc;
+
+use log::{debug, error, info, warn};
+use cstr::cstr;
+
+
 
 // const SINGLE_PHASE_CURRENT_PIN: u8 = 35;
 // const SINGLE_PHASE_VOLTAGE_PIN: u8 = 34;
@@ -49,13 +51,13 @@ fn main() -> anyhow::Result<()> {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // Initialize NVS storage
-    let nvs = Arc::new(EspNvs::new(STORAGE_PARTITION_NAME)?);
-    let mut storage = EspNvsStorage::new(nvs, STORAGE_NAMESPACE, true)?;
+    // Initialize LittleFS storage
+    let mut fs_conf = init_littlefs_storage();
+    info!("Initialized and mounted littlefs storage.");
 
+    // SSID and password for the Wifi access point.
     let mut ap_ssid: String = String::new();
     let ap_password: &str = "12345678";
-
     configure_access_point_ssid(&mut ap_ssid)?;
     info!("Configured AP SSID as: {}.", ap_ssid);
 
@@ -117,6 +119,22 @@ fn main() -> anyhow::Result<()> {
 
         sleep(Duration::from_millis(1000));
     }
+}
+
+fn init_littlefs_storage() -> anyhow::Result<esp_idf_sys::esp_vfs_littlefs_conf_t> {
+    let mut fs_conf = esp_idf_sys::esp_vfs_littlefs_conf_t {
+        base_path: cstr!("/littlefs").as_ptr(),
+        partition_label: cstr!("littlefs").as_ptr(),
+        ..Default::default()
+    };
+    fs_conf.set_format_if_mount_failed(true as u8);
+    fs_conf.set_dont_mount(false as u8);
+
+    unsafe {esp!(esp_idf_sys::esp_vfs_littlefs_register(&fs_conf))?};
+    let (mut fs_total_bytes, mut fs_used_bytes) = (0, 0);
+    unsafe {esp!(esp_idf_sys::esp_littlefs_info(fs_conf.partition_label, &mut fs_total_bytes, &mut fs_used_bytes))?};
+
+    Ok(fs_conf)
 }
 
 /// Sets the value of `ap_ssid` as a combination of this
