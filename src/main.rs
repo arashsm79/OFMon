@@ -121,13 +121,22 @@ fn main() -> anyhow::Result<()> {
 
 /// Sets the value of `ap_ssid` as a combination of this
 /// device MAC address and a custom string.
-fn configure_access_point_ssid(ap_ssid: &mut String) -> anyhow::Result<()>{
+fn configure_access_point_ssid(ap_ssid: &mut String) -> anyhow::Result<()> {
     let mut mac = [0u8; 6];
-    esp!(unsafe { esp_idf_sys::esp_read_mac(mac.as_mut_ptr() as *mut _, esp_idf_sys::esp_mac_type_t_ESP_MAC_WIFI_SOFTAP)})?;
+    esp!(unsafe {
+        esp_idf_sys::esp_read_mac(
+            mac.as_mut_ptr() as *mut _,
+            esp_idf_sys::esp_mac_type_t_ESP_MAC_WIFI_SOFTAP,
+        )
+    })?;
     ap_ssid.push_str("SEM-");
-    ap_ssid.push_str(format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                 mac[0], mac[1], mac[2],
-                 mac[3], mac[4], mac[5]).as_str());
+    ap_ssid.push_str(
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        )
+        .as_str(),
+    );
     Ok(())
 }
 
