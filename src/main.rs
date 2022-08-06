@@ -17,7 +17,8 @@ use embedded_svc::wifi::Wifi;
 use esp_idf_hal::prelude::Peripherals;
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::netif::EspNetifStack;
-use esp_idf_svc::nvs::EspDefaultNvs;
+use esp_idf_svc::nvs::{EspDefaultNvs, EspNvs};
+use esp_idf_svc::nvs_storage::EspNvsStorage;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_sys::esp;
@@ -39,8 +40,8 @@ const CURRENT_SCALE: [f32; 3] = [102.0; 3]; //111.1;
 const VOLTAGE_SCALE: [f32; 3] = [232.5; 3];
 const MAX_SAMPLES: usize = 120;
 
-const STORAGE_PARTITION_NAME: &str = "storage";
-const STORAGE_NAMESPACE: &str = "st";
+static NVS_PARTITION_NAME: &str = "keystore";
+static LITTLEFS_PARTITION_NAME: &str = "littlefs";
 
 static ACCESS_TOKEN: String = String::new();
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
@@ -52,8 +53,11 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     // Initialize LittleFS storage
-    let mut fs_conf = init_littlefs_storage();
+    let mut fs_conf = init_littlefs_storage()?;
     info!("Initialized and mounted littlefs storage.");
+
+    // Initialize NVS storage
+    let mut keystore = init_nvs_storage()?;
 
     // SSID and password for the Wifi access point.
     let mut ap_ssid: String = String::new();
@@ -121,10 +125,14 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Initializes a littlefs file system.
+///
+/// A partition with name `LITTLEFS_PARTITION_NAME` has to be specified
+/// in the partition table csv file.
 fn init_littlefs_storage() -> anyhow::Result<esp_idf_sys::esp_vfs_littlefs_conf_t> {
     let mut fs_conf = esp_idf_sys::esp_vfs_littlefs_conf_t {
         base_path: cstr!("/littlefs").as_ptr(),
-        partition_label: cstr!("littlefs").as_ptr(),
+        partition_label: cstr!(LITTLEFS_PARTITION_NAME).as_ptr(),
         ..Default::default()
     };
     fs_conf.set_format_if_mount_failed(true as u8);
@@ -136,6 +144,15 @@ fn init_littlefs_storage() -> anyhow::Result<esp_idf_sys::esp_vfs_littlefs_conf_
 
     Ok(fs_conf)
 }
+
+/// Initializes a nvs file system.
+///
+/// A partition with name `NVS_PARTITION_NAME` has to be specified
+/// in the partition table csv file.
+fn init_nvs_storage() -> anyhow::Result<EspNvsStorage> {
+    let nvs = Arc::new(EspNvs::new(NVS_PARTITION_NAME)?);
+    Ok(EspNvsStorage::new(nvs, "f", true)?)
+} 
 
 /// Sets the value of `ap_ssid` as a combination of this
 /// device MAC address and a custom string.

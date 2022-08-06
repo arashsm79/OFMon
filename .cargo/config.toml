@@ -29,8 +29,6 @@ build-std = ["std", "panic_abort"]
 [env]
 # Note: these variables are not used when using pio builder
 # Enables the esp-idf-sys "native" build feature (`cargo build --features native`) to build against ESP-IDF stable (v4.4)
-ESP_IDF_VERSION = { value = "branch:release/v4.4" }
-# Enables the esp-idf-sys "native" build feature (`cargo build --features native`) to build against ESP-IDF master (mainline)
-#ESP_IDF_VERSION = { value = "master" }
-ESP_IDF_TOOLS_INSTALL_DIR = { value = "global"}
+# ESP_IDF_VERSION = { value = "branch:release/v4.4" }
+# ESP_IDF_TOOLS_INSTALL_DIR = { value = "global"}
 

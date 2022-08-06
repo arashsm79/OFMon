@@ -20,6 +20,12 @@ native = ["esp-idf-sys/native"]
 component_dirs = ["components"]
 bindings_header = "src/bindings.h"
 
+[package.metadata.esp-idf-sys]
+esp_idf_version = "branch:release/v4.4"
+esp_idf_tools_install_dir = "global"
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+esp_idf_components = ["esp_wifi", "spiffs", "vfs", "esp_http_server", "bootloader", "esp_adc", "hal"]
+
 [dependencies]
 anyhow = {version = "1", features = ["backtrace"]}
 log = "0.4"
