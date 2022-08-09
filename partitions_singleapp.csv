@@ -3,10 +3,8 @@
 # nvs,      24K
 # phy_init, 4K
 # factory,  2M
-# littlefs, 1.8M
-# keystore, 100K
+# littlefs, 1.9M
 nvs,      data, nvs,     ,        0x6000,
 phy_init, data, phy,     ,        0x1000,
 factory,  app,  factory, ,        2M,
-littlefs, data, spiffs,  ,        0x1d0000,
-keystore, data, nvs,     ,        0x19000,
+littlefs, data, spiffs,  ,        0x1e0000,

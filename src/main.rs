@@ -1,33 +1,33 @@
-use std::ffi::CString;
-use std::str::FromStr;
+use std::fs;
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::bail;
-use embedded_hal_0_2_7::adc::OneShot;
 use embedded_svc::http::server::registry::Registry;
 use embedded_svc::http::server::{Request, Response};
 use embedded_svc::http::SendStatus;
+use embedded_svc::io::Read as SvcRead;
 use embedded_svc::ipv4::{Ipv4Addr, Mask, RouterConfiguration, Subnet};
-use embedded_svc::wifi::{
-    AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status,
-};
 use embedded_svc::wifi::Wifi;
-use esp_idf_hal::prelude::Peripherals;
+use embedded_svc::wifi::{AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status};
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::netif::EspNetifStack;
-use esp_idf_svc::nvs::{EspDefaultNvs, EspNvs};
+use esp_idf_svc::nvs::EspDefaultNvs;
 use esp_idf_svc::nvs_storage::EspNvsStorage;
+use esp_idf_svc::sntp;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_sys::esp;
+
+use embedded_hal_0_2_7::adc::OneShot;
 use esp_idf_hal::adc;
+use esp_idf_hal::prelude::Peripherals;
 
-use log::{debug, error, info, warn};
+use anyhow::bail;
 use cstr::cstr;
-
-
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 
 // const SINGLE_PHASE_CURRENT_PIN: u8 = 35;
 // const SINGLE_PHASE_VOLTAGE_PIN: u8 = 34;
@@ -40,9 +40,7 @@ const CURRENT_SCALE: [f32; 3] = [102.0; 3]; //111.1;
 const VOLTAGE_SCALE: [f32; 3] = [232.5; 3];
 const MAX_SAMPLES: usize = 120;
 
-static NVS_PARTITION_NAME: &str = "keystore";
-static LITTLEFS_PARTITION_NAME: &str = "littlefs";
-
+#[allow(dead_code)]
 static ACCESS_TOKEN: String = String::new();
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
@@ -52,12 +50,34 @@ fn main() -> anyhow::Result<()> {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
+    // return Ok(());
     // Initialize LittleFS storage
-    let mut fs_conf = init_littlefs_storage()?;
+    let _fs_conf = init_littlefs_storage()?;
     info!("Initialized and mounted littlefs storage.");
 
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open("/littlefs/logfile")?;
+        info!("Opened file for writing.");
+        file.write_all(b"Hello Wonderland!\n")?;
+        info!("Write complete.");
+    }
+    {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/littlefs/logfile")?;
+        info!("Opened file for reading.");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        info!("Read complete.");
+        println!("{}", contents);
+    }
+
     // Initialize NVS storage
-    let mut keystore = init_nvs_storage()?;
+    let (default_nvs, keystore) = init_nvs_storage()?;
 
     // SSID and password for the Wifi access point.
     let mut ap_ssid: String = String::new();
@@ -65,10 +85,10 @@ fn main() -> anyhow::Result<()> {
     configure_access_point_ssid(&mut ap_ssid)?;
     info!("Configured AP SSID as: {}.", ap_ssid);
 
-    let _wifi = init_access_point(&ap_ssid, ap_password)?;
+    let _wifi = init_access_point(&ap_ssid, ap_password, default_nvs)?;
     info!("Initialized Wifi.");
 
-    let _web_server = init_web_server()?;
+    let _web_server = init_web_server(keystore.clone())?;
     info!("Initialized Web Server.");
 
     // Initilize peripherals and pins
@@ -132,15 +152,25 @@ fn main() -> anyhow::Result<()> {
 fn init_littlefs_storage() -> anyhow::Result<esp_idf_sys::esp_vfs_littlefs_conf_t> {
     let mut fs_conf = esp_idf_sys::esp_vfs_littlefs_conf_t {
         base_path: cstr!("/littlefs").as_ptr(),
-        partition_label: cstr!(LITTLEFS_PARTITION_NAME).as_ptr(),
+        partition_label: cstr!("littlefs").as_ptr(),
         ..Default::default()
     };
     fs_conf.set_format_if_mount_failed(true as u8);
     fs_conf.set_dont_mount(false as u8);
 
-    unsafe {esp!(esp_idf_sys::esp_vfs_littlefs_register(&fs_conf))?};
+    unsafe { esp!(esp_idf_sys::esp_vfs_littlefs_register(&fs_conf))? };
     let (mut fs_total_bytes, mut fs_used_bytes) = (0, 0);
-    unsafe {esp!(esp_idf_sys::esp_littlefs_info(fs_conf.partition_label, &mut fs_total_bytes, &mut fs_used_bytes))?};
+    unsafe {
+        esp!(esp_idf_sys::esp_littlefs_info(
+            fs_conf.partition_label,
+            &mut fs_total_bytes,
+            &mut fs_used_bytes
+        ))?
+    };
+    info!(
+        "LittleFs Info: total bytes = {}, used bytes = {}.",
+        fs_total_bytes, fs_used_bytes
+    );
 
     Ok(fs_conf)
 }
@@ -149,10 +179,11 @@ fn init_littlefs_storage() -> anyhow::Result<esp_idf_sys::esp_vfs_littlefs_conf_
 ///
 /// A partition with name `NVS_PARTITION_NAME` has to be specified
 /// in the partition table csv file.
-fn init_nvs_storage() -> anyhow::Result<EspNvsStorage> {
-    let nvs = Arc::new(EspNvs::new(NVS_PARTITION_NAME)?);
-    Ok(EspNvsStorage::new(nvs, "f", true)?)
-} 
+fn init_nvs_storage() -> anyhow::Result<(Arc<EspDefaultNvs>, Arc<EspNvsStorage>)> {
+    let default_nvs = Arc::new(EspDefaultNvs::new()?);
+    let keystore = Arc::new(EspNvsStorage::new_default(default_nvs.clone(), "f", true)?);
+    Ok((default_nvs, keystore))
+}
 
 /// Sets the value of `ap_ssid` as a combination of this
 /// device MAC address and a custom string.
@@ -178,10 +209,13 @@ fn configure_access_point_ssid(ap_ssid: &mut String) -> anyhow::Result<()> {
 /// Initializes access point with the given ssid and pasword.
 ///
 /// Authentication method is WPA2Personal.
-fn init_access_point(ssid: &str, password: &str) -> anyhow::Result<Box<EspWifi>> {
+fn init_access_point(
+    ssid: &str,
+    password: &str,
+    default_nvs: Arc<EspDefaultNvs>,
+) -> anyhow::Result<Box<EspWifi>> {
     let netif_stack = Arc::new(EspNetifStack::new()?);
     let sys_loop_stack = Arc::new(EspSysLoopStack::new()?);
-    let default_nvs = Arc::new(EspDefaultNvs::new()?);
 
     let mut wifi = Box::new(EspWifi::new(netif_stack, sys_loop_stack, default_nvs)?);
     wifi.set_configuration(&embedded_svc::wifi::Configuration::AccessPoint(
@@ -217,7 +251,7 @@ fn init_access_point(ssid: &str, password: &str) -> anyhow::Result<Box<EspWifi>>
 }
 
 /// Initilizes the web server and registers some handlers.
-fn init_web_server() -> anyhow::Result<EspHttpServer> {
+fn init_web_server(keystore: Arc<EspNvsStorage>) -> anyhow::Result<EspHttpServer> {
     let mut server = EspHttpServer::new(&Default::default())?;
 
     server.handle_get("/", |req, mut res| {
@@ -234,8 +268,21 @@ fn init_web_server() -> anyhow::Result<EspHttpServer> {
         Ok(())
     })?;
 
-    server.handle_get("/time", |req, mut res| {
+    server.handle_get("/time", |mut req, mut res| {
         println!("{:#?}", req.query_string());
+        let mut buf = [0_u8; 256];
+        let mut size = 0;
+        let mut reader = req.reader();
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            size += n;
+        }
+        println!("Read {} bytes of data", size);
+        println!("Response: {}", std::str::from_utf8(&buf)?);
+        // get time, set it, return parsed time as response.
         res.set_ok();
         res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
