@@ -13,8 +13,10 @@ debug = true # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [features]
-default = ["native"]
+default = ["native", "single-phase"]
 native = ["esp-idf-sys/native"]
+single-phase = []
+three-phase = []
 
 [[package.metadata.esp-idf-sys.extra_components]]
 component_dirs = ["components"]
