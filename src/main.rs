@@ -36,14 +36,15 @@ use log::{debug, error, info, warn};
 // const THREE_PHASE_CURRENT_PINS: [u8; 3] = [32, 35, 34];
 // const THREE_PHASE_VOLTAGE_PINS: [u8; 3] = [39, 36, 33];
 // const LED_PIN: u8 = 14;
-const DC_VOLTAGE: [u16; 3] = [1892; 3];
-const DC_CURRENT: [u16; 3] = [1635; 3];
-const CURRENT_SCALE: [f32; 3] = [102.0; 3]; //111.1;
-const VOLTAGE_SCALE: [f32; 3] = [232.5; 3];
+// const DC_VOLTAGE: [u16; 3] = [1892; 3];
+// const DC_CURRENT: [u16; 3] = [1635; 3];
+// const CURRENT_SCALE: [f32; 3] = [102.0; 3]; //111.1;
+// const VOLTAGE_SCALE: [f32; 3] = [232.5; 3];
 const MAX_SAMPLES: usize = 300;
 const AC_PHASE: u8 = 1;
-const ADC_COUNT: u32 = 4095;
-
+const ADC_BITS: u32 = 12;
+const ADC_COUNTS: u32 = ADC_BITS << 1;
+const SUPPLY_VOLTAGE: f32 = 3.3;
 const SAMPLE_ACCUMULATOR: [f32; MAX_SAMPLES] = [0.0; MAX_SAMPLES];
 
 struct VoltagePin {
@@ -62,9 +63,14 @@ struct CurrentPin {
 struct CT {
     current_pin: CurrentPin,
     voltage_pin: VoltagePin,
-    current_samples: [f32; MAX_SAMPLES],
-    voltage_samples: [f32; MAX_SAMPLES],
-    sample_count: usize,
+}
+
+#[derive(Debug)]
+struct CTReading {
+    real_power: f32,
+    apparent_power: f32,
+    i_rms: f32,
+    v_rms: f32,
 }
 
 #[allow(dead_code)]
@@ -100,7 +106,7 @@ fn main() -> anyhow::Result<()> {
 
     // Initilize peripherals and pins
     let peripherals = Peripherals::take().unwrap();
-    let mut pins = peripherals.pins;
+    let pins = peripherals.pins;
 
     // Initilize ADC
 
@@ -110,43 +116,13 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut cts = init_adc(pins)?;
 
-    let ac_phase = 1;
-    let mut current_samples = [0.0; MAX_SAMPLES];
-    let mut voltage_samples = [0.0; MAX_SAMPLES];
-    let mut sample_count = 0;
-
     loop {
-        // Read current and voltage values, calibrate them
-        // and add them to the samples array
         for ct in &mut cts {
-            ct.calculate_energy(&mut powered_adc1, 20, time::Duration::new(5, 0))?;
+            info!("Started Sampling: {:?}", std::time::SystemTime::now());
+            let rd = ct.calculate_energy(&mut powered_adc1, 20, std::time::Duration::new(2, 0))?;
+            info!("Finished Sampling: {:?}", std::time::SystemTime::now());
+            info!("Readings: {:?}", rd);
         }
-//         let raw_current_reading =
-//          powered_adc1.read(&mut cts[0].current_pin.pin).unwrap() - DC_CURRENT[ac_phase];
-        //         let current_reading =
-        //             CURRENT_SCALE[ac_phase] * ((raw_current_reading as f32 * 3.3) / 4095.0);
-        //
-        //         let raw_voltage_reading =
-        //             powered_adc1.read(&mut single_phase_voltage_pin).unwrap() - DC_VOLTAGE[ac_phase];
-        //         let voltage_reading =
-        //             VOLTAGE_SCALE[ac_phase] * ((raw_voltage_reading as f32 * 3.3) / 4095.0);
-        //
-        //         current_samples[sample_count] = current_reading;
-        //         voltage_samples[sample_count] = voltage_reading;
-        //
-        //         sample_count += 1;
-        //
-        //         info!("Current: {}", current_reading);
-        //         info!("Voltage: {}", voltage_reading);
-        //
-        //         if sample_count >= MAX_SAMPLES {
-        //             let current_rms = calc_rms(&current_samples, sample_count);
-        //             let voltage_rms = calc_rms(&voltage_samples, sample_count);
-        //             sample_count = 0;
-        //             info!("Current RMS : {}", current_rms);
-        //             info!("Voltage RMS : {}", voltage_rms);
-        //         }
-        //
         sleep(Duration::from_millis(1000));
     }
 }
@@ -157,18 +133,15 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
         Ok([CT {
             current_pin: CurrentPin {
                 pin: pins.gpio35.into_analog_atten_11db()?,
-                ical: 3.3,
-                offset_i: 1000,
+                ical: 30.0,
+                offset_i: ADC_COUNTS >> 1,
             },
             voltage_pin: VoltagePin {
                 pin: pins.gpio34.into_analog_atten_11db()?,
-                vcal: 3.3,
-                phase_cal: 1.2,
-                offset_v: 1000,
+                vcal: 219.25,
+                phase_cal: 1.7,
+                offset_v: ADC_COUNTS >> 1,
             },
-            sample_count: 0,
-            current_samples: [0.0; MAX_SAMPLES],
-            voltage_samples: [0.0; MAX_SAMPLES],
         }])
     }
     #[cfg(feature = "three-phase")]
@@ -177,50 +150,41 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
             CT {
                 current_pin: CurrentPin {
                     pin: pins.gpio32.into_analog_atten_11db()?,
-                    ical: 3.3,
-                    offset_i: 1000,
+                    ical: 30.0,
+                    offset_i: ADC_COUNTS >> 1,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio39.into_analog_atten_11db()?,
-                    vcal: 3.3,
-                    phase_cal: 1.2,
-                    offset_v: 1000,
+                    vcal: 219.25,
+                    phase_cal: 1.7,
+                    offset_v: ADC_COUNTS >> 1,
                 },
-                sample_count: 0,
-                current_samples: [0.0; MAX_SAMPLES],
-                voltage_samples: [0.0; MAX_SAMPLES],
             },
             CT {
                 current_pin: CurrentPin {
                     pin: pins.gpio35.into_analog_atten_11db()?,
-                    ical: 3.3,
-                    offset_i: 1000,
+                    ical: 30.0,
+                    offset_i: ADC_COUNTS >> 1,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio36.into_analog_atten_11db()?,
-                    vcal: 3.3,
-                    phase_cal: 1.2,
-                    offset_v: 1000,
+                    vcal: 219.25,
+                    phase_cal: 1.7,
+                    offset_v: ADC_COUNTS >> 1,
                 },
-                sample_count: 0,
-                current_samples: [0.0; MAX_SAMPLES],
-                voltage_samples: [0.0; MAX_SAMPLES],
             },
             CT {
                 current_pin: CurrentPin {
                     pin: pins.gpio34.into_analog_atten_11db()?,
-                    ical: 3.3,
-                    offset_i: 1000,
+                    ical: 30.0,
+                    offset_i: ADC_COUNTS >> 1,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio33.into_analog_atten_11db()?,
-                    vcal: 3.3,
-                    phase_cal: 1.2,
-                    offset_v: 1000,
+                    vcal: 219.25,
+                    phase_cal: 1.7,
+                    offset_v: ADC_COUNTS >> 1,
                 },
-                sample_count: 0,
-                current_samples: [0.0; MAX_SAMPLES],
-                voltage_samples: [0.0; MAX_SAMPLES],
             },
         ])
     }
@@ -231,14 +195,33 @@ impl CT {
         &mut self,
         powered_adc1: &mut PoweredAdc<ADC1>,
         crossing: u32,
-        timeout: time::Duration,
-    ) -> anyhow::Result<()> {
-        let supply_voltage = 3.3;
-        let mut start = time::Instant::now(); // start.elapsed() makes sure it doesnt get stuck in the loop if there is an error.
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<CTReading> {
+
+        // Variables
+        let mut cross_count = 0;
+        let mut n_samples: u32 = 0;
+
+        // Used for delay/phase compensation
+        let mut filtered_v = 0.0;
+        let mut last_filtered_v;
+        let mut filtered_i;
+
+        let mut sample_v: u16 = 0;
+        let mut sample_i: u16 = 0;
+        let mut offset_v: f32 = self.voltage_pin.offset_v as f32;
+        let mut offset_i: f32 = self.current_pin.offset_i as f32;
+
+        let (mut sum_v, mut sum_i, mut sum_p) = (0.0, 0.0, 0.0);
+        let mut check_v_cross = false;
+        let mut last_v_cross;
+
+        let mut start = std::time::Instant::now(); // start.elapsed() makes sure it doesnt get stuck in the loop if there is an error.
         let start_v = 0.0;
+
         // 1) Waits for the waveform to be close to 'zero' (mid-scale adc) part in sin curve.
         loop {
-            if (start_v < ADC_COUNT as f32 * 0.55) && (start_v > ADC_COUNT as f32 * 0.45) {
+            if (start_v < ADC_COUNTS as f32 * 0.55) && (start_v > ADC_COUNTS as f32 * 0.45) {
                 break;
             }
             if start.elapsed() > timeout {
@@ -247,27 +230,11 @@ impl CT {
         }
 
         // 2) Main measurement loop
-        let mut cross_count = 0;
-        let mut n_samples = 0;
-
-        // Used for delay/phase compensation
-        let mut filtered_v = 0.0;
-        let mut last_filtered_v = 0.0;
-        let mut filtered_i = 0.0;
-
-        let mut phase_shift_v = 0.0;
-
-        let mut sample_v: u16 = 0;
-        let mut sample_i: u16 = 0;
-        let mut offset_v: f32 = 0.0;
-        let mut offset_i: f32 = 0.0;
-
-        let (mut sq_v, mut sum_v, mut sq_i, mut sum_i, mut inst_p, mut sum_p) =
-            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let (mut last_v_cross, mut check_v_cross) = (true, true);
-
-        start = time::Instant::now();
+        start = std::time::Instant::now();
         while (cross_count < crossing) && (start.elapsed() > timeout) {
+            n_samples += 1;
+            last_filtered_v = filtered_v;
+
             // A) Read in raw voltage and current samples
             sample_i = powered_adc1
                 .read(&mut self.current_pin.pin)
@@ -285,14 +252,11 @@ impl CT {
             filtered_v = sample_v as f32 - offset_v;
 
             // C) RMS
-            sq_v = filtered_v * filtered_v;
-            sum_v += sq_v;
-
-            sq_i = filtered_i * filtered_i;
-            sum_i += sq_i;
+            sum_v += filtered_v * filtered_v;
+            sum_i += filtered_i * filtered_i;
 
             // E) Phase calibration
-            phase_shift_v =
+            let phase_shift_v =
                 last_filtered_v + self.voltage_pin.phase_cal * (filtered_v - last_filtered_v);
 
             // F) Instantaneous power calc
@@ -316,18 +280,22 @@ impl CT {
             }
         }
 
-        let v_ratio = self.voltage_pin.vcal * (3.3 / (ADC_COUNT as f32));
+        let v_ratio = self.voltage_pin.vcal * (SUPPLY_VOLTAGE / (ADC_COUNTS as f32));
         let v_rms = v_ratio * f32::sqrt(sum_v / n_samples as f32);
 
-        let i_ratio = self.current_pin.ical * (3.3 / (ADC_COUNT as f32));
+        let i_ratio = self.current_pin.ical * (SUPPLY_VOLTAGE / (ADC_COUNTS as f32));
         let i_rms = i_ratio * f32::sqrt(sum_i / n_samples as f32);
 
         // Calculate power values
-        let real_power = v_ratio * i_ratio * sum_p / n_samples as f32;
+        let real_power = v_ratio * i_ratio * (sum_p / n_samples as f32);
         let apparent_power = v_rms * i_rms;
-        let power_factor = real_power / apparent_power;
 
-        Ok(())
+        Ok(CTReading {
+            real_power,
+            apparent_power,
+            i_rms,
+            v_rms
+        })
     }
 }
 
@@ -502,6 +470,7 @@ fn templated_webpage(content: impl AsRef<str>) -> String {
 }
 
 /// Calculates the RMS value for a given slice of samples.
+#[allow(dead_code)]
 fn calc_rms(samples: &[f32], size: usize) -> f32 {
     (samples[..size].iter().fold(0.0, |sum, &x| sum + (x * x)) / size as f32).sqrt()
 }

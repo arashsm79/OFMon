@@ -31,7 +31,6 @@ esp_idf_components = ["esp_wifi", "spiffs", "vfs", "esp_http_server", "bootloade
 [dependencies]
 anyhow = {version = "1", features = ["backtrace"]}
 log = "0.4"
-time = "0.3.12"
 esp-idf-sys = { version = "0.31.7", features = ["binstart"]}
 esp-idf-svc = { version = "0.42.1", features = ["experimental"]}
 esp-idf-hal = "0.38"
