@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
     loop {
         for ct in &mut cts {
             info!("Started Sampling: {:?}", std::time::SystemTime::now());
-            let rd = ct.calculate_energy(&mut powered_adc1, 20, std::time::Duration::new(2, 0))?;
+            let rd = ct.calculate_energy(&mut powered_adc1, 1000, std::time::Duration::new(2, 0))?;
             info!("Finished Sampling: {:?}", std::time::SystemTime::now());
             info!("Readings: {:?}", rd);
         }
@@ -139,13 +139,13 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
             current_pin: CurrentPin {
                 pin: pins.gpio35.into_analog_atten_11db()?,
                 ical: 102.0,
-                offset_i: MAX_READING >> 1,
+                offset_i: 1066,
             },
             voltage_pin: VoltagePin {
                 pin: pins.gpio34.into_analog_atten_11db()?,
                 vcal: 232.5,
                 phase_cal: 1.7,
-                offset_v: MAX_READING >> 1,
+                offset_v: 1288,
             },
         }])
     }
@@ -211,8 +211,8 @@ impl CT {
         let mut last_filtered_v;
         let mut filtered_i;
 
-        let mut sample_v;
-        let mut sample_i;
+        let mut sample_v: u16 = 0;
+        let mut sample_i: u16 = 0;
         let mut offset_v: f32 = self.voltage_pin.offset_v as f32;
         let mut offset_i: f32 = self.current_pin.offset_i as f32;
 
@@ -221,17 +221,14 @@ impl CT {
         let mut last_v_cross;
 
         let mut start = std::time::Instant::now(); // start.elapsed() makes sure it doesnt get stuck in the loop if there is an error.
-        let mut start_v;
-
-        let channel_i = self.current_pin.pin.adc_channel() as adc_channel_t;
-        let channel_v = self.voltage_pin.pin.adc_channel() as adc_channel_t;
+        let mut start_v = 0;
 
         // 1) Waits for the waveform to be close to 'zero' (mid-scale adc) part in sin curve.
         loop {
-            start_v = unsafe { adc1_get_raw(channel_v) };
+            start_v = powered_adc1.read(&mut self.voltage_pin.pin).unwrap_or(start_v);
 
-            if ((start_v as f32) < MAX_READING as f32 * 0.55)
-                && ((start_v as f32) > MAX_READING as f32 * 0.45)
+            if ((start_v as f32) < MAX_MV_ATTEN_11 as f32 * 0.55)
+                && ((start_v as f32) > MAX_MV_ATTEN_11 as f32 * 0.45)
             {
                 break;
             }
@@ -248,19 +245,17 @@ impl CT {
             last_filtered_v = filtered_v;
 
             // A) Read in raw voltage and current samples
-            sample_i =  unsafe { adc1_get_raw(channel_i) };
-            sample_v =  unsafe { adc1_get_raw(channel_v) };
+            sample_i =  powered_adc1.read(&mut self.current_pin.pin).unwrap_or(sample_i);
+            sample_v =  powered_adc1.read(&mut self.voltage_pin.pin).unwrap_or(sample_v);
 
             // B) Apply digital low pass filters to extract the 2.5 V or 1.65 V dc offset,
             //     then subtract this - signal is now centred on 0 counts.
-            offset_i = offset_i + ((sample_i as f32 - offset_i) / 1024.0);
+            offset_i = offset_i + ((sample_i as f32 - offset_i) / 512.0);
             filtered_i = sample_i as f32 - offset_i;
 
-            offset_v = offset_v + ((sample_v as f32 - offset_v) / 1024.0);
+            offset_v = offset_v + ((sample_v as f32 - offset_v) / 512.0);
             filtered_v = sample_v as f32 - offset_v;
-
-            info!("current: {}, offset_i: {}, filterted_i: {}\nvoltage: {}, offset_v: {}, filtered_v: {}", sample_i, offset_i, filtered_i, sample_v, offset_v, filtered_v);
-
+            
             // C) RMS
             sum_v += filtered_v * filtered_v;
             sum_i += filtered_i * filtered_i;
@@ -290,13 +285,10 @@ impl CT {
             }
         }
 
-        info!("crossings: {}", cross_count);
-        info!("n_samples: {}", n_samples);
-
-        let v_ratio = self.voltage_pin.vcal * (SUPPLY_VOLTAGE / (MAX_READING as f32));
+        let v_ratio = self.voltage_pin.vcal * (SUPPLY_VOLTAGE / (MAX_MV_ATTEN_11 as f32));
         let v_rms = v_ratio * f32::sqrt(sum_v / n_samples as f32);
 
-        let i_ratio = self.current_pin.ical * (SUPPLY_VOLTAGE / (MAX_READING as f32));
+        let i_ratio = self.current_pin.ical * (SUPPLY_VOLTAGE / (MAX_MV_ATTEN_11 as f32));
         let i_rms = i_ratio * f32::sqrt(sum_i / n_samples as f32);
 
         // Calculate power values
