@@ -1,8 +1,8 @@
-use std::fs;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, UNIX_EPOCH};
+use std::{fs, ops};
 
 use embedded_hal_0_2_7::adc::OneShot;
 use embedded_svc::http::server::registry::Registry;
@@ -23,7 +23,7 @@ use esp_idf_svc::nvs_storage::EspNvsStorage;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::systime::EspSystemTime;
 use esp_idf_svc::wifi::EspWifi;
-use esp_idf_sys::{adc_channel_t, esp, adc1_get_raw};
+use esp_idf_sys::{adc1_get_raw, adc_channel_t, esp};
 
 use esp_idf_hal::adc;
 use esp_idf_hal::prelude::Peripherals;
@@ -67,6 +67,7 @@ struct CurrentPin {
 struct CT {
     current_pin: CurrentPin,
     voltage_pin: VoltagePin,
+    reading: CTReading,
 }
 
 #[derive(Debug)]
@@ -124,9 +125,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         for ct in &mut cts {
             info!("Started Sampling: {:?}", std::time::SystemTime::now());
-            let rd = ct.calculate_energy(&mut powered_adc1, 1000, std::time::Duration::new(2, 0))?;
+            ct.calculate_energy(&mut powered_adc1, 1000, std::time::Duration::new(2, 0))?;
             info!("Finished Sampling: {:?}", std::time::SystemTime::now());
-            info!("Readings: {:?}", rd);
+            info!("Readings: {:?}", ct.reading);
         }
         sleep(Duration::from_millis(1000));
     }
@@ -147,6 +148,13 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                 phase_cal: 1.7,
                 offset_v: 1288,
             },
+            reading: CTReading {
+                i_rms: 0.0,
+                v_rms: 0.0,
+                timestamp: 0,
+                real_power: 0.0,
+                apparent_power: 0.0,
+            },
         }])
     }
     #[cfg(feature = "three-phase")]
@@ -164,6 +172,13 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     phase_cal: 1.7,
                     offset_v: MAX_READING >> 1,
                 },
+                reading: CTReading {
+                    i_rms: 0.0,
+                    v_rms: 0.0,
+                    timestamp: 0,
+                    real_power: 0.0,
+                    apparent_power: 0.0,
+                },
             },
             CT {
                 current_pin: CurrentPin {
@@ -176,6 +191,13 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     vcal: 219.25,
                     phase_cal: 1.7,
                     offset_v: MAX_READING >> 1,
+                },
+                reading: CTReading {
+                    i_rms: 0.0,
+                    v_rms: 0.0,
+                    timestamp: 0,
+                    real_power: 0.0,
+                    apparent_power: 0.0,
                 },
             },
             CT {
@@ -190,6 +212,13 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     phase_cal: 1.7,
                     offset_v: MAX_READING >> 1,
                 },
+                reading: CTReading {
+                    i_rms: 0.0,
+                    v_rms: 0.0,
+                    timestamp: 0,
+                    real_power: 0.0,
+                    apparent_power: 0.0,
+                },
             },
         ])
     }
@@ -201,7 +230,7 @@ impl CT {
         powered_adc1: &mut PoweredAdc<ADC1>,
         crossing: u32,
         timeout: std::time::Duration,
-    ) -> anyhow::Result<CTReading> {
+    ) -> anyhow::Result<()> {
         // Variables
         let mut cross_count = 0;
         let mut n_samples: u32 = 0;
@@ -225,7 +254,9 @@ impl CT {
 
         // 1) Waits for the waveform to be close to 'zero' (mid-scale adc) part in sin curve.
         loop {
-            start_v = powered_adc1.read(&mut self.voltage_pin.pin).unwrap_or(start_v);
+            start_v = powered_adc1
+                .read(&mut self.voltage_pin.pin)
+                .unwrap_or(start_v);
 
             if ((start_v as f32) < MAX_MV_ATTEN_11 as f32 * 0.55)
                 && ((start_v as f32) > MAX_MV_ATTEN_11 as f32 * 0.45)
@@ -245,8 +276,12 @@ impl CT {
             last_filtered_v = filtered_v;
 
             // A) Read in raw voltage and current samples
-            sample_i =  powered_adc1.read(&mut self.current_pin.pin).unwrap_or(sample_i);
-            sample_v =  powered_adc1.read(&mut self.voltage_pin.pin).unwrap_or(sample_v);
+            sample_i = powered_adc1
+                .read(&mut self.current_pin.pin)
+                .unwrap_or(sample_i);
+            sample_v = powered_adc1
+                .read(&mut self.voltage_pin.pin)
+                .unwrap_or(sample_v);
 
             // B) Apply digital low pass filters to extract the 2.5 V or 1.65 V dc offset,
             //     then subtract this - signal is now centred on 0 counts.
@@ -255,7 +290,7 @@ impl CT {
 
             offset_v = offset_v + ((sample_v as f32 - offset_v) / 512.0);
             filtered_v = sample_v as f32 - offset_v;
-            
+
             // C) RMS
             sum_v += filtered_v * filtered_v;
             sum_i += filtered_i * filtered_i;
@@ -294,14 +329,24 @@ impl CT {
         // Calculate power values
         let real_power = v_ratio * i_ratio * (sum_p / n_samples as f32);
         let apparent_power = v_rms * i_rms;
-
-        Ok(CTReading {
+        let new_reading = CTReading {
             real_power,
             apparent_power,
             i_rms,
             v_rms,
             timestamp: ESP_SYSTEM_TIME.now().as_secs(),
-        })
+        };
+        self.reading += new_reading;
+        Ok(())
+    }
+}
+
+impl ops::AddAssign<CTReading> for CTReading {
+    fn add_assign(&mut self, rhs: CTReading) {
+        self.i_rms = (self.i_rms + rhs.i_rms) / 2.0;
+        self.v_rms = (self.v_rms + rhs.v_rms) / 2.0;
+        self.real_power = (self.real_power + rhs.real_power) / 2.0;
+        self.apparent_power = (self.apparent_power + rhs.apparent_power) / 2.0;
     }
 }
 
