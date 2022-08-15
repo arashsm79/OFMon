@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::{fs, ops};
 
 use embedded_hal_0_2_7::adc::OneShot;
@@ -14,7 +15,7 @@ use embedded_svc::sys_time::SystemTime;
 use embedded_svc::wifi::Wifi;
 use embedded_svc::wifi::{AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status};
 use esp_idf_hal::adc::{Atten11dB, PoweredAdc, ADC1};
-use esp_idf_hal::gpio::{ADCPin, Gpio34, Gpio35, Pins};
+use esp_idf_hal::gpio::{Gpio34, Gpio35, Pins};
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::netif::EspNetifStack;
 use esp_idf_svc::nvs::EspDefaultNvs;
@@ -23,7 +24,7 @@ use esp_idf_svc::nvs_storage::EspNvsStorage;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::systime::EspSystemTime;
 use esp_idf_svc::wifi::EspWifi;
-use esp_idf_sys::{adc1_get_raw, adc_channel_t, esp};
+use esp_idf_sys::{esp, gettimeofday, timeval};
 
 use esp_idf_hal::adc;
 use esp_idf_hal::prelude::Peripherals;
@@ -42,29 +43,41 @@ use log::{debug, error, info, warn};
 // const DC_CURRENT: [u16; 3] = [1635; 3];
 // const CURRENT_SCALE: [f32; 3] = [102.0; 3]; //111.1;
 // const VOLTAGE_SCALE: [f32; 3] = [232.5; 3];
-const MAX_SAMPLES: usize = 600;
-const AC_PHASE: u8 = 1;
+
+/// Specify the number of CT modules that will be connected
+/// to this system.
+#[cfg(feature = "single-phase")]
+const AC_PHASE: usize = 1;
+#[cfg(feature = "three-phase")]
+const AC_PHASE: usize = 3;
+
 const ADC_BITS: u32 = 12;
 const MAX_READING: u32 = 1 << ADC_BITS;
-const MAX_MV_ATTEN_11: u32 = 2450;
+const MAX_MV_ATTEN_11: u16 = 2450;
 const SUPPLY_VOLTAGE: f32 = 3.3;
+const SAVE_PERIOD_TIMEOUT: u64 = 120; // 3600 for one hour
+const MAX_SHARD_SIZE: u64 = 256; // in bytes
+const CT_READING_SIZE: usize = 30; // in bytes
+const MAX_SAMPLES: usize = 600;
 const SAMPLE_ACCUMULATOR: [f32; MAX_SAMPLES] = [0.0; MAX_SAMPLES];
+const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
 static ESP_SYSTEM_TIME: &EspSystemTime = &EspSystemTime {};
 
 struct VoltagePin {
     pin: Gpio34<Atten11dB<ADC1>>,
     vcal: f32,
     phase_cal: f32,
-    offset_v: u32,
+    offset_v: f32,
 }
 
 struct CurrentPin {
     pin: Gpio35<Atten11dB<ADC1>>,
     ical: f32,
-    offset_i: u32,
+    offset_i: f32,
 }
 
 struct CT {
+    id: u16,
     current_pin: CurrentPin,
     voltage_pin: VoltagePin,
     reading: CTReading,
@@ -76,14 +89,16 @@ struct CTReading {
     apparent_power: f32,
     i_rms: f32,
     v_rms: f32,
+    kwh: f32,
     timestamp: u64,
 }
 
-#[allow(dead_code)]
 static ACCESS_TOKEN: String = String::new();
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 fn main() -> anyhow::Result<()> {
+    let storage_lock = Arc::new(Mutex::new(0));
+
     esp_idf_sys::link_patches();
 
     // Bind the log crate to the ESP Logging facilities
@@ -93,6 +108,9 @@ fn main() -> anyhow::Result<()> {
     // Initialize LittleFS storage
     // let _fs_conf = init_littlefs_storage()?;
     info!("Initialized and mounted littlefs storage.");
+
+    // Initialize CT readings shards
+    let (mut readings_shards, mut readings_shard_counter) = find_newest_readings_shard_num()?;
 
     // Initialize NVS storage
     // let (default_nvs, _keystore) = init_nvs_storage()?;
@@ -122,31 +140,137 @@ fn main() -> anyhow::Result<()> {
     let mut cts = init_adc(pins)?;
     info!("Initialized ADC 1.");
 
+    // Main Loop
+    let mut save_period_start = Instant::now();
     loop {
         for ct in &mut cts {
-            info!("Started Sampling: {:?}", std::time::SystemTime::now());
-            ct.calculate_energy(&mut powered_adc1, 1000, std::time::Duration::new(2, 0))?;
-            info!("Finished Sampling: {:?}", std::time::SystemTime::now());
-            info!("Readings: {:?}", ct.reading);
+            ct.calculate_energy(&mut powered_adc1, 200, std::time::Duration::new(3, 0))?;
+            info!("Energy Reading: {:?}", ct.reading);
+        }
+
+        // save the readings of CTs to storage.
+        if save_period_start.elapsed() > Duration::new(SAVE_PERIOD_TIMEOUT, 0) {
+            info!("Saving to storage.");
+            let _gaurd = match storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            save_to_storage(&cts, &mut readings_shards, &mut readings_shard_counter)?;
+            save_period_start = Instant::now();
         }
         sleep(Duration::from_millis(1000));
     }
 }
 
-fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
+/// Find the newest readings shard id
+///
+/// under "/littlefs/ct_readings" files are saved with a number as their filename.
+/// here we iterate through all of them and find the newest file (the one with higher number as
+/// its filename). This is the file that we will be appending new data to.
+fn find_newest_readings_shard_num() -> anyhow::Result<(HashSet<i32>, i32)> {
+    let mut shard_set = HashSet::new();
+    let mut max_num = 1;
+    if let Ok(paths) = fs::read_dir("/littlefs/ct_readings") {
+        for path in paths {
+            let num = path?.file_name().to_str().unwrap().parse()?;
+            max_num = i32::max(max_num, num);
+            shard_set.insert(num);
+        }
+    } else {
+        fs::create_dir("/littlefs/ct_readings")?;
+    }
+    Ok((shard_set, max_num))
+}
+
+/// Save sensor readings to storage.
+///
+/// this function does not do any synchronization. If something like mutex is needed, you must deal
+/// with it before calling this function.
+/// under "/littlefs/ct_readings" files are saved with a number as their filename.
+/// newer files have a higher number as their filename.
+fn save_to_storage(
+    cts: &[CT; AC_PHASE],
+    readings_shards: &mut HashSet<i32>,
+    readings_shard_counter: &mut i32,
+) -> anyhow::Result<()> {
+    // check whether the selected shard has enough size. if it doesn't create a new shard
+    if ((MAX_SHARD_SIZE
+        - fs::metadata(format!("/littlefs/ct_readings/{}", readings_shard_counter))?.len())
+        as usize)
+        < CT_READING_SIZE
+    {
+        *readings_shard_counter += 1;
+        readings_shards.insert(*readings_shard_counter);
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(format!("/littlefs/ct_readings/{}", readings_shard_counter))?;
+    info!(
+        "Opened {} for writing.",
+        format!("/littlefs/ct_readings/{}", readings_shard_counter)
+    );
+
+    // Append the readings for each CT at the end of the file
+    for ct in cts {
+        let buf = ct_reading_to_le_bytes(ct)?;
+        file.write_all(&buf)?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn ct_reading_to_le_bytes(ct: &CT) -> anyhow::Result<[u8; CT_READING_SIZE]> {
+    let mut buf = [0_u8; CT_READING_SIZE];
+    let mut pos = 0;
+    pos += add_u16_to_buf(&ct.id, &mut buf, &pos)?;
+    pos += add_f32_to_buf(&ct.reading.real_power, &mut buf, &pos)?;
+    pos += add_f32_to_buf(&ct.reading.apparent_power, &mut buf, &pos)?;
+    pos += add_f32_to_buf(&ct.reading.i_rms, &mut buf, &pos)?;
+    pos += add_f32_to_buf(&ct.reading.v_rms, &mut buf, &pos)?;
+    pos += add_f32_to_buf(&ct.reading.kwh, &mut buf, &pos)?;
+    add_u64_to_buf(&ct.reading.timestamp, &mut buf, &pos)?;
+    Ok(buf)
+}
+
+fn add_u16_to_buf(val: &u16, buf: &mut [u8], offset: &usize) -> anyhow::Result<usize> {
+    let bytes = val.to_le_bytes();
+    let n = bytes.len();
+    buf[*offset..(n + (*offset))].copy_from_slice(&bytes);
+    Ok(n)
+}
+
+fn add_f32_to_buf(val: &f32, buf: &mut [u8], offset: &usize) -> anyhow::Result<usize> {
+    let bytes = val.to_le_bytes();
+    let n = bytes.len();
+    buf[*offset..(n + (*offset))].copy_from_slice(&bytes);
+    Ok(n)
+}
+
+fn add_u64_to_buf(val: &u64, buf: &mut [u8], offset: &usize) -> anyhow::Result<usize> {
+    let bytes = val.to_le_bytes();
+    let n = bytes.len();
+    buf[*offset..(n + (*offset))].copy_from_slice(&bytes);
+    Ok(n)
+}
+
+fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE]> {
     #[cfg(feature = "single-phase")]
     {
         Ok([CT {
+            id: 1,
             current_pin: CurrentPin {
                 pin: pins.gpio35.into_analog_atten_11db()?,
                 ical: 102.0,
-                offset_i: 1066,
+                offset_i: 1066.0,
             },
             voltage_pin: VoltagePin {
                 pin: pins.gpio34.into_analog_atten_11db()?,
                 vcal: 232.5,
                 phase_cal: 1.7,
-                offset_v: 1288,
+                offset_v: 1288.0,
             },
             reading: CTReading {
                 i_rms: 0.0,
@@ -154,6 +278,7 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                 timestamp: 0,
                 real_power: 0.0,
                 apparent_power: 0.0,
+                kwh: 0.0,
             },
         }])
     }
@@ -161,16 +286,17 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
     {
         Ok([
             CT {
+                id: 1,
                 current_pin: CurrentPin {
                     pin: pins.gpio32.into_analog_atten_11db()?,
                     ical: 30.0,
-                    offset_i: MAX_READING >> 1,
+                    offset_i: 1066.0,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio39.into_analog_atten_11db()?,
                     vcal: 219.25,
                     phase_cal: 1.7,
-                    offset_v: MAX_READING >> 1,
+                    offset_v: 1288.0,
                 },
                 reading: CTReading {
                     i_rms: 0.0,
@@ -178,19 +304,21 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     timestamp: 0,
                     real_power: 0.0,
                     apparent_power: 0.0,
+                    kwh: 0.0,
                 },
             },
             CT {
+                id: 2,
                 current_pin: CurrentPin {
                     pin: pins.gpio35.into_analog_atten_11db()?,
                     ical: 30.0,
-                    offset_i: MAX_READING >> 1,
+                    offset_i: 1066.0,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio36.into_analog_atten_11db()?,
                     vcal: 219.25,
                     phase_cal: 1.7,
-                    offset_v: MAX_READING >> 1,
+                    offset_v: 1288.0,
                 },
                 reading: CTReading {
                     i_rms: 0.0,
@@ -198,19 +326,21 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     timestamp: 0,
                     real_power: 0.0,
                     apparent_power: 0.0,
+                    kwh: 0.0,
                 },
             },
             CT {
+                id: 3,
                 current_pin: CurrentPin {
                     pin: pins.gpio34.into_analog_atten_11db()?,
                     ical: 30.0,
-                    offset_i: MAX_READING >> 1,
+                    offset_i: 1066.0,
                 },
                 voltage_pin: VoltagePin {
                     pin: pins.gpio33.into_analog_atten_11db()?,
                     vcal: 219.25,
                     phase_cal: 1.7,
-                    offset_v: MAX_READING >> 1,
+                    offset_v: 1288.0,
                 },
                 reading: CTReading {
                     i_rms: 0.0,
@@ -218,6 +348,7 @@ fn init_adc(pins: Pins) -> anyhow::Result<[CT; AC_PHASE as usize]> {
                     timestamp: 0,
                     real_power: 0.0,
                     apparent_power: 0.0,
+                    kwh: 0.0,
                 },
             },
         ])
@@ -237,13 +368,19 @@ impl CT {
 
         // Used for delay/phase compensation
         let mut filtered_v = 0.0;
-        let mut last_filtered_v;
-        let mut filtered_i;
+        let mut last_filtered_v = 0.0;
+        let mut filtered_i = 0.0;
+        let mut last_filtered_i = 0.0;
 
         let mut sample_v: u16 = 0;
         let mut sample_i: u16 = 0;
         let mut offset_v: f32 = self.voltage_pin.offset_v as f32;
         let mut offset_i: f32 = self.current_pin.offset_i as f32;
+
+        let mut min_sample_i: u16 = MAX_MV_ATTEN_11;
+        let mut min_sample_v: u16 = MAX_MV_ATTEN_11;
+        let mut max_sample_i: u16 = 0;
+        let mut max_sample_v: u16 = 0;
 
         let (mut sum_v, mut sum_i, mut sum_p) = (0.0, 0.0, 0.0);
         let mut check_v_cross = false;
@@ -267,14 +404,9 @@ impl CT {
                 break;
             }
         }
-        info!("found middle of voltage {}", start_v);
-
         // 2) Main measurement loop
         start = std::time::Instant::now();
         while (cross_count < crossing) && (start.elapsed() < timeout) {
-            n_samples += 1;
-            last_filtered_v = filtered_v;
-
             // A) Read in raw voltage and current samples
             sample_i = powered_adc1
                 .read(&mut self.current_pin.pin)
@@ -290,6 +422,16 @@ impl CT {
 
             offset_v = offset_v + ((sample_v as f32 - offset_v) / 512.0);
             filtered_v = sample_v as f32 - offset_v;
+
+            // Ignore noise
+            if f32::abs(last_filtered_v - filtered_v) < NOISE_THRESHOLD {
+                min_sample_v = u16::min(min_sample_v, sample_v);
+                max_sample_v = u16::max(max_sample_v, sample_v);
+            }
+            if f32::abs(last_filtered_i - filtered_i) < NOISE_THRESHOLD {
+                min_sample_i = u16::min(min_sample_i, sample_i);
+                max_sample_i = u16::max(max_sample_i, sample_i);
+            }
 
             // C) RMS
             sum_v += filtered_v * filtered_v;
@@ -311,14 +453,25 @@ impl CT {
             } else {
                 check_v_cross = false;
             }
-            if n_samples == 1 {
+            if n_samples == 0 {
                 last_v_cross = check_v_cross;
             }
 
             if last_v_cross != check_v_cross {
                 cross_count += 1;
             }
+
+            n_samples += 1;
+            last_filtered_v = filtered_v;
+            last_filtered_i = filtered_i;
         }
+
+        // Improve the approximation for mid point (dc offset)
+        offset_i = (offset_i + ((max_sample_i + min_sample_i) as f32 / 2.0)) / 2.0;
+        offset_v = (offset_v + ((max_sample_v + min_sample_v) as f32 / 2.0)) / 2.0;
+
+        self.current_pin.offset_i = offset_i;
+        self.voltage_pin.offset_v = offset_v;
 
         let v_ratio = self.voltage_pin.vcal * (SUPPLY_VOLTAGE / (MAX_MV_ATTEN_11 as f32));
         let v_rms = v_ratio * f32::sqrt(sum_v / n_samples as f32);
@@ -327,16 +480,23 @@ impl CT {
         let i_rms = i_ratio * f32::sqrt(sum_i / n_samples as f32);
 
         // Calculate power values
-        let real_power = v_ratio * i_ratio * (sum_p / n_samples as f32);
+        let real_power = f32::abs(v_ratio * i_ratio * (sum_p / n_samples as f32));
         let apparent_power = v_rms * i_rms;
+        let kwh = real_power * start.elapsed().as_secs_f32() / SAVE_PERIOD_TIMEOUT as f32;
         let new_reading = CTReading {
             real_power,
             apparent_power,
+            kwh,
             i_rms,
             v_rms,
-            timestamp: ESP_SYSTEM_TIME.now().as_secs(),
+            timestamp: now().as_millis() as u64,
         };
         self.reading += new_reading;
+        info!("Current offset: {}", offset_i);
+        info!("Vol offset: {}", offset_v);
+        info!("n_samples: {}", n_samples);
+        info!("crossing: {}", cross_count);
+        info!("dur: {}", start.elapsed().as_millis());
         Ok(())
     }
 }
@@ -347,6 +507,7 @@ impl ops::AddAssign<CTReading> for CTReading {
         self.v_rms = (self.v_rms + rhs.v_rms) / 2.0;
         self.real_power = (self.real_power + rhs.real_power) / 2.0;
         self.apparent_power = (self.apparent_power + rhs.apparent_power) / 2.0;
+        self.kwh = self.kwh + rhs.kwh;
     }
 }
 
@@ -524,4 +685,14 @@ fn templated_webpage(content: impl AsRef<str>) -> String {
 #[allow(dead_code)]
 fn calc_rms(samples: &[f32], size: usize) -> f32 {
     (samples[..size].iter().fold(0.0, |sum, &x| sum + (x * x)) / size as f32).sqrt()
+}
+
+fn now() -> Duration {
+    let mut tv_now: timeval = Default::default();
+
+    unsafe {
+        gettimeofday(&mut tv_now as *mut _, core::ptr::null_mut());
+    }
+
+    Duration::from_micros(tv_now.tv_sec as u64 * 1000000_u64 + tv_now.tv_usec as u64)
 }
