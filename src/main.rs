@@ -1,14 +1,11 @@
 mod ct;
 pub(crate) mod utils;
 
-use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use std::{fs, ops};
 
-use embedded_hal_0_2_7::adc::OneShot;
 use embedded_svc::http::server::registry::Registry;
 use embedded_svc::http::server::{Request, Response};
 use embedded_svc::http::SendStatus;
@@ -24,7 +21,7 @@ use esp_idf_svc::nvs_storage::EspNvsStorage;
 use esp_idf_svc::sysloop::EspSysLoopStack;
 use esp_idf_svc::systime::EspSystemTime;
 use esp_idf_svc::wifi::EspWifi;
-use esp_idf_sys::{esp, gettimeofday, timeval};
+use esp_idf_sys::{esp, gettimeofday, settimeofday, timeval};
 
 use esp_idf_hal::adc;
 use esp_idf_hal::prelude::Peripherals;
@@ -59,18 +56,14 @@ const MAX_MV_ATTEN_11: u16 = 2450;
 const SUPPLY_VOLTAGE: f32 = 3.3;
 const SAVE_PERIOD_TIMEOUT: u64 = 120; // 3600 for one hour
 const MAX_SHARD_SIZE: u64 = 256; // in bytes
+const MAX_TIME_STORAGE_SIZE: u64 = 256; // in bytes
 const CT_READING_SIZE: usize = 30; // in bytes
 const MAX_SAMPLES: usize = 600;
 const SAMPLE_ACCUMULATOR: [f32; MAX_SAMPLES] = [0.0; MAX_SAMPLES];
 const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
 static ESP_SYSTEM_TIME: &EspSystemTime = &EspSystemTime {};
 
-
-struct TimeStorage {
-
-}
-
-static ACCESS_TOKEN: String = String::new();
+const ACCESS_TOKEN_SIZE: usize = 20;
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 fn main() -> anyhow::Result<()> {
@@ -135,6 +128,7 @@ fn main() -> anyhow::Result<()> {
                 Err(poisoned) => poisoned.into_inner(),
             };
             ct_storage.save_to_storage(&cts)?;
+            ct_storage.store_time(now().as_millis() as u64)?;
 
             // Reset CT readings.
             for ct in &mut cts {
@@ -145,7 +139,6 @@ fn main() -> anyhow::Result<()> {
         sleep(Duration::from_millis(1000));
     }
 }
-
 
 /// Initializes a littlefs file system.
 ///
@@ -253,26 +246,25 @@ fn init_access_point(
 }
 
 /// Initilizes the web server and registers some handlers.
-fn init_web_server() -> anyhow::Result<EspHttpServer> {
+fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHttpServer> {
     let mut server = EspHttpServer::new(&Default::default())?;
 
-    server.handle_get("/", |req, mut res| {
-        println!("{:#?}", req.query_string());
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/", |mut req, mut res| {
         res.set_ok();
         res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
     })?;
 
-    server.handle_get("/telemetry", |req, mut res| {
-        println!("{:#?}", req.query_string());
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/telemetry", |mut req, mut res| {
         res.set_ok();
-        res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
     })?;
 
-    server.handle_get("/time", |mut req, mut res| {
-        println!("{:#?}", req.query_string());
-        let mut buf = [0_u8; 256];
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/time", move |mut req, mut res| {
+        let mut buf = [0_u8; std::mem::size_of::<u64>()];
         let mut size = 0;
         let mut reader = req.reader();
         loop {
@@ -283,15 +275,47 @@ fn init_web_server() -> anyhow::Result<EspHttpServer> {
             size += n;
         }
         println!("Read {} bytes of data", size);
-        println!("Response: {}", std::str::from_utf8(&buf)?);
-        // get time, set it, return parsed time as response.
+
+        // Convert raw bytes to time. Store it and update system time.
+        let time = u64::from_le_bytes(buf);
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            ct_storage.store_time(time)?;
+            println!("Response: {}", time);
+        }
+        set_system_time(time)?;
+
         res.set_ok();
-        res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
     })?;
 
-    server.handle_get("/token", |req, mut res| {
-        println!("{:#?}", req.query_string());
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/token", move |mut req, mut res| {
+        let mut buf = [0_u8; ACCESS_TOKEN_SIZE];
+        let mut size = 0;
+        let mut reader = req.reader();
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            size += n;
+        }
+        println!("Read {} bytes of data", size);
+
+        let token = buf;
+        // Store the given token in storage.
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            ct_storage.store_token(&token)?;
+            println!("Response: {}", std::str::from_utf8(&token)?);
+        }
         res.set_ok();
         Ok(())
     })?;
@@ -331,4 +355,13 @@ fn now() -> Duration {
     }
 
     Duration::from_micros(tv_now.tv_sec as u64 * 1000000_u64 + tv_now.tv_usec as u64)
+}
+
+fn set_system_time(time: u64) -> anyhow::Result<()> {
+    let mut tv_now: timeval = timeval {
+        tv_sec: time as i32,
+        tv_usec: 0,
+    };
+    esp!(unsafe { settimeofday(&mut tv_now as *mut _, core::ptr::null_mut()) });
+    Ok(())
 }

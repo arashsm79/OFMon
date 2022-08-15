@@ -1,6 +1,6 @@
-use crate::now;
+use crate::{now, MAX_TIME_STORAGE_SIZE, set_system_time, ACCESS_TOKEN_SIZE};
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Seek, Write, Read};
 
 use std::{fs, ops};
 
@@ -8,8 +8,12 @@ use embedded_hal_0_2_7::adc::OneShot;
 
 use esp_idf_hal::adc::{Atten11dB, PoweredAdc, ADC1};
 use esp_idf_hal::gpio::{Gpio34, Gpio35, Pins};
+use esp_idf_sys::settimeofday;
 
-use crate::{utils::*, MAX_MV_ATTEN_11, AC_PHASE, MAX_SHARD_SIZE, CT_READING_SIZE, NOISE_THRESHOLD, SUPPLY_VOLTAGE, SAVE_PERIOD_TIMEOUT};
+use crate::{
+    utils::*, AC_PHASE, CT_READING_SIZE, MAX_MV_ATTEN_11, MAX_SHARD_SIZE, NOISE_THRESHOLD,
+    SAVE_PERIOD_TIMEOUT, SUPPLY_VOLTAGE,
+};
 
 use anyhow::bail;
 use cstr::cstr;
@@ -113,10 +117,73 @@ impl CTStorage {
         for ct in cts {
             let buf = CTStorage::ct_reading_to_le_bytes(ct)?;
             file.write_all(&buf)?;
+            info!("Wrote reading: {:?}", ct.reading)
         }
         file.flush()?;
+        info!("Flushed readings to storage.");
         Ok(())
     }
+
+    // Retrieve the latest time from storage and update RTC
+    pub(crate) fn update_system_time(&mut self) -> anyhow::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/littlefs/time")?;
+        file.seek(std::io::SeekFrom::End(-(std::mem::size_of::<u64>() as i64)))?;
+        let mut time_buf = [12_u8; 8];
+        file.read_exact(&mut time_buf)?;
+        let time = u64::from_le_bytes(time_buf);
+        set_system_time(time)?;
+        Ok(())
+    }
+
+    // Store the given time to storage
+    pub(crate) fn store_time(&mut self, time: u64) -> anyhow::Result<()> {
+        let mut file = if ((MAX_TIME_STORAGE_SIZE - fs::metadata("/littlefs/time/{}")?.len())
+            as usize)
+            < std::mem::size_of::<u64>()
+        {
+            // If the file is full, create a new one overwriting the previous file.
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/littlefs/time")?
+        } else {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(true)
+                .open("/littlefs/time")?
+        };
+
+        file.write_all(&time.to_le_bytes())?;
+        Ok(())
+    }
+
+    // Retrieve the latest token from storage
+    pub(crate) fn retrieve_token(&mut self) -> anyhow::Result<[u8; ACCESS_TOKEN_SIZE]> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/littlefs/time")?;
+        let mut token = [0_u8; ACCESS_TOKEN_SIZE];
+        file.read_exact(&mut token)?;
+        Ok(token)
+    }
+
+    // Store the given token to storage
+    pub(crate) fn store_token(&mut self, token: &[u8]) -> anyhow::Result<()> {
+        let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/littlefs/token")?;
+        file.write_all(token)?;
+        Ok(())
+    }
+
 
     fn ct_reading_to_le_bytes(ct: &CT) -> anyhow::Result<[u8; CT_READING_SIZE]> {
         let mut buf = [0_u8; CT_READING_SIZE];
