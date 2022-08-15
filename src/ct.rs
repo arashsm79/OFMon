@@ -50,8 +50,8 @@ pub struct CTReading {
 }
 
 pub struct CTStorage {
-    readings_shard_counter: i32,
-    readings_shards: HashSet<i32>,
+    pub readings_shard_counter: i32,
+    pub readings_shards: HashSet<i32>,
 }
 
 impl CTStorage {

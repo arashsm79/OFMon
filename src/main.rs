@@ -257,8 +257,15 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/telemetry", |mut req, mut res| {
+    server.handle_get("/telemetry", move |mut req, mut res| {
         res.set_ok();
+        let writer = res.into_writer()?;
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
         Ok(())
     })?;
 
