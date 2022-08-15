@@ -93,12 +93,15 @@ struct CTReading {
     timestamp: u64,
 }
 
+struct CTStorage {
+    readings_shard_counter: i32,
+    readings_shards: HashSet<i32>,
+}
+
 static ACCESS_TOKEN: String = String::new();
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 fn main() -> anyhow::Result<()> {
-    let storage_lock = Arc::new(Mutex::new(0));
-
     esp_idf_sys::link_patches();
 
     // Bind the log crate to the ESP Logging facilities
@@ -110,7 +113,8 @@ fn main() -> anyhow::Result<()> {
     info!("Initialized and mounted littlefs storage.");
 
     // Initialize CT readings shards
-    let (mut readings_shards, mut readings_shard_counter) = find_newest_readings_shard_num()?;
+    let storage_lock = Arc::new(Mutex::new(CTStorage::new()));
+    storage_lock.lock().unwrap().find_newest_readings_shard_num()?;
 
     // Initialize NVS storage
     // let (default_nvs, _keystore) = init_nvs_storage()?;
@@ -151,88 +155,94 @@ fn main() -> anyhow::Result<()> {
         // save the readings of CTs to storage.
         if save_period_start.elapsed() > Duration::new(SAVE_PERIOD_TIMEOUT, 0) {
             info!("Saving to storage.");
-            let _gaurd = match storage_lock.lock() {
+            let mut ct_storage = match storage_lock.lock() {
                 Ok(gaurd) => gaurd,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            save_to_storage(&cts, &mut readings_shards, &mut readings_shard_counter)?;
+            ct_storage.save_to_storage(&cts)?;
             save_period_start = Instant::now();
         }
         sleep(Duration::from_millis(1000));
     }
 }
 
-/// Find the newest readings shard id
-///
-/// under "/littlefs/ct_readings" files are saved with a number as their filename.
-/// here we iterate through all of them and find the newest file (the one with higher number as
-/// its filename). This is the file that we will be appending new data to.
-fn find_newest_readings_shard_num() -> anyhow::Result<(HashSet<i32>, i32)> {
-    let mut shard_set = HashSet::new();
-    let mut max_num = 1;
-    if let Ok(paths) = fs::read_dir("/littlefs/ct_readings") {
-        for path in paths {
-            let num = path?.file_name().to_str().unwrap().parse()?;
-            max_num = i32::max(max_num, num);
-            shard_set.insert(num);
+impl CTStorage {
+    fn new() -> Self {
+        CTStorage {
+            readings_shard_counter: 1,
+            readings_shards: HashSet::new(),
         }
-    } else {
-        fs::create_dir("/littlefs/ct_readings")?;
     }
-    Ok((shard_set, max_num))
-}
 
-/// Save sensor readings to storage.
-///
-/// this function does not do any synchronization. If something like mutex is needed, you must deal
-/// with it before calling this function.
-/// under "/littlefs/ct_readings" files are saved with a number as their filename.
-/// newer files have a higher number as their filename.
-fn save_to_storage(
-    cts: &[CT; AC_PHASE],
-    readings_shards: &mut HashSet<i32>,
-    readings_shard_counter: &mut i32,
-) -> anyhow::Result<()> {
-    // check whether the selected shard has enough size. if it doesn't create a new shard
-    if ((MAX_SHARD_SIZE
-        - fs::metadata(format!("/littlefs/ct_readings/{}", readings_shard_counter))?.len())
-        as usize)
-        < CT_READING_SIZE
-    {
-        *readings_shard_counter += 1;
-        readings_shards.insert(*readings_shard_counter);
+    /// Find the newest readings shard id
+    ///
+    /// under "/littlefs/ct_readings" files are saved with a number as their filename.
+    /// here we iterate through all of them and find the newest file (the one with higher number as
+    /// its filename). This is the file that we will be appending new data to.
+    fn find_newest_readings_shard_num(&mut self) -> anyhow::Result<()> {
+        let mut max_num = 1;
+        if let Ok(paths) = fs::read_dir("/littlefs/ct_readings") {
+            for path in paths {
+                let num = path?.file_name().to_str().unwrap().parse()?;
+                max_num = i32::max(max_num, num);
+                self.readings_shards.insert(num);
+            }
+        } else {
+            fs::create_dir("/littlefs/ct_readings")?;
+        }
+        Ok(())
     }
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(format!("/littlefs/ct_readings/{}", readings_shard_counter))?;
-    info!(
-        "Opened {} for writing.",
-        format!("/littlefs/ct_readings/{}", readings_shard_counter)
-    );
 
-    // Append the readings for each CT at the end of the file
-    for ct in cts {
-        let buf = ct_reading_to_le_bytes(ct)?;
-        file.write_all(&buf)?;
+    /// Save sensor readings to storage.
+    ///
+    /// this function does not do any synchronization. If something like mutex is needed, you must deal
+    /// with it before calling this function.
+    /// under "/littlefs/ct_readings" files are saved with a number as their filename.
+    /// newer files have a higher number as their filename.
+    fn save_to_storage(
+        &mut self,
+        cts: &[CT; AC_PHASE],
+    ) -> anyhow::Result<()> {
+        // check whether the selected shard has enough size. if it doesn't create a new shard
+        if ((MAX_SHARD_SIZE
+            - fs::metadata(format!("/littlefs/ct_readings/{}", self.readings_shard_counter))?.len())
+            as usize)
+            < CT_READING_SIZE
+        {
+            self.readings_shard_counter += 1;
+            self.readings_shards.insert(self.readings_shard_counter);
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(format!("/littlefs/ct_readings/{}", self.readings_shard_counter))?;
+        info!(
+            "Opened {} for writing.",
+            format!("/littlefs/ct_readings/{}", self.readings_shard_counter)
+        );
+
+        // Append the readings for each CT at the end of the file
+        for ct in cts {
+            let buf = CTStorage::ct_reading_to_le_bytes(ct)?;
+            file.write_all(&buf)?;
+        }
+        file.flush()?;
+        Ok(())
     }
-    file.flush()?;
-    Ok(())
-}
 
-fn ct_reading_to_le_bytes(ct: &CT) -> anyhow::Result<[u8; CT_READING_SIZE]> {
-    let mut buf = [0_u8; CT_READING_SIZE];
-    let mut pos = 0;
-    pos += add_u16_to_buf(&ct.id, &mut buf, &pos)?;
-    pos += add_f32_to_buf(&ct.reading.real_power, &mut buf, &pos)?;
-    pos += add_f32_to_buf(&ct.reading.apparent_power, &mut buf, &pos)?;
-    pos += add_f32_to_buf(&ct.reading.i_rms, &mut buf, &pos)?;
-    pos += add_f32_to_buf(&ct.reading.v_rms, &mut buf, &pos)?;
-    pos += add_f32_to_buf(&ct.reading.kwh, &mut buf, &pos)?;
-    add_u64_to_buf(&ct.reading.timestamp, &mut buf, &pos)?;
-    Ok(buf)
+    fn ct_reading_to_le_bytes(ct: &CT) -> anyhow::Result<[u8; CT_READING_SIZE]> {
+        let mut buf = [0_u8; CT_READING_SIZE];
+        let mut pos = 0;
+        pos += add_u16_to_buf(&ct.id, &mut buf, &pos)?;
+        pos += add_f32_to_buf(&ct.reading.real_power, &mut buf, &pos)?;
+        pos += add_f32_to_buf(&ct.reading.apparent_power, &mut buf, &pos)?;
+        pos += add_f32_to_buf(&ct.reading.i_rms, &mut buf, &pos)?;
+        pos += add_f32_to_buf(&ct.reading.v_rms, &mut buf, &pos)?;
+        pos += add_f32_to_buf(&ct.reading.kwh, &mut buf, &pos)?;
+        add_u64_to_buf(&ct.reading.timestamp, &mut buf, &pos)?;
+        Ok(buf)
+    }
 }
 
 fn add_u16_to_buf(val: &u16, buf: &mut [u8], offset: &usize) -> anyhow::Result<usize> {
