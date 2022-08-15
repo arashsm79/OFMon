@@ -114,7 +114,10 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize CT readings shards
     let storage_lock = Arc::new(Mutex::new(CTStorage::new()));
-    storage_lock.lock().unwrap().find_newest_readings_shard_num()?;
+    storage_lock
+        .lock()
+        .unwrap()
+        .find_newest_readings_shard_num()?;
 
     // Initialize NVS storage
     // let (default_nvs, _keystore) = init_nvs_storage()?;
@@ -160,6 +163,11 @@ fn main() -> anyhow::Result<()> {
                 Err(poisoned) => poisoned.into_inner(),
             };
             ct_storage.save_to_storage(&cts)?;
+
+            // Reset CT readings.
+            for ct in &mut cts {
+                ct.reset();
+            }
             save_period_start = Instant::now();
         }
         sleep(Duration::from_millis(1000));
@@ -199,14 +207,14 @@ impl CTStorage {
     /// with it before calling this function.
     /// under "/littlefs/ct_readings" files are saved with a number as their filename.
     /// newer files have a higher number as their filename.
-    fn save_to_storage(
-        &mut self,
-        cts: &[CT; AC_PHASE],
-    ) -> anyhow::Result<()> {
+    fn save_to_storage(&mut self, cts: &[CT; AC_PHASE]) -> anyhow::Result<()> {
         // check whether the selected shard has enough size. if it doesn't create a new shard
         if ((MAX_SHARD_SIZE
-            - fs::metadata(format!("/littlefs/ct_readings/{}", self.readings_shard_counter))?.len())
-            as usize)
+            - fs::metadata(format!(
+                "/littlefs/ct_readings/{}",
+                self.readings_shard_counter
+            ))?
+            .len()) as usize)
             < CT_READING_SIZE
         {
             self.readings_shard_counter += 1;
@@ -216,7 +224,10 @@ impl CTStorage {
             .write(true)
             .create(true)
             .append(true)
-            .open(format!("/littlefs/ct_readings/{}", self.readings_shard_counter))?;
+            .open(format!(
+                "/littlefs/ct_readings/{}",
+                self.readings_shard_counter
+            ))?;
         info!(
             "Opened {} for writing.",
             format!("/littlefs/ct_readings/{}", self.readings_shard_counter)
@@ -377,9 +388,9 @@ impl CT {
         let mut n_samples: u32 = 0;
 
         // Used for delay/phase compensation
-        let mut filtered_v = 0.0;
+        let mut filtered_v;
         let mut last_filtered_v = 0.0;
-        let mut filtered_i = 0.0;
+        let mut filtered_i;
         let mut last_filtered_i = 0.0;
 
         let mut sample_v: u16 = 0;
@@ -509,6 +520,10 @@ impl CT {
         info!("dur: {}", start.elapsed().as_millis());
         Ok(())
     }
+
+    fn reset(&mut self) {
+        self.reading.reset();
+    }
 }
 
 impl ops::AddAssign<CTReading> for CTReading {
@@ -518,6 +533,17 @@ impl ops::AddAssign<CTReading> for CTReading {
         self.real_power = (self.real_power + rhs.real_power) / 2.0;
         self.apparent_power = (self.apparent_power + rhs.apparent_power) / 2.0;
         self.kwh = self.kwh + rhs.kwh;
+    }
+}
+
+impl CTReading {
+    fn reset(&mut self) {
+        self.i_rms = 0.0;
+        self.v_rms = 0.0;
+        self.real_power = 0.0;
+        self.apparent_power = 0.0;
+        self.kwh = 0.0;
+        self.timestamp = 0;
     }
 }
 
