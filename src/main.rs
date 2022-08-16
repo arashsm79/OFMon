@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use embedded_svc::http::server::registry::Registry;
 use embedded_svc::http::server::{Request, Response};
 use embedded_svc::http::SendStatus;
-use embedded_svc::io::Read as SvcRead;
+use embedded_svc::io::{Read as SvcRead, Write as SvcWrite};
 use embedded_svc::ipv4::{Ipv4Addr, Mask, RouterConfiguration, Subnet};
 use embedded_svc::wifi::Wifi;
 use embedded_svc::wifi::{AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status};
@@ -50,19 +50,22 @@ const AC_PHASE: usize = 1;
 #[cfg(feature = "three-phase")]
 const AC_PHASE: usize = 3;
 
+// ADC constants
 const ADC_BITS: u32 = 12;
 const MAX_READING: u32 = 1 << ADC_BITS;
 const MAX_MV_ATTEN_11: u16 = 2450;
 const SUPPLY_VOLTAGE: f32 = 3.3;
+const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
+
+// Periodic actions constants
 const SAVE_PERIOD_TIMEOUT: u64 = 120; // 3600 for one hour
+
+// Storage constants
 const MAX_SHARD_SIZE: u64 = 256; // in bytes
 const MAX_TIME_STORAGE_SIZE: u64 = 256; // in bytes
 const CT_READING_SIZE: usize = 30; // in bytes
-const MAX_SAMPLES: usize = 600;
-const SAMPLE_ACCUMULATOR: [f32; MAX_SAMPLES] = [0.0; MAX_SAMPLES];
-const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
-static ESP_SYSTEM_TIME: &EspSystemTime = &EspSystemTime {};
 
+// Network constants
 const ACCESS_TOKEN_SIZE: usize = 20;
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
@@ -250,21 +253,22 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     let mut server = EspHttpServer::new(&Default::default())?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/", |mut req, mut res| {
+    server.handle_get("/", | _req, mut res| {
         res.set_ok();
         res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/telemetry", move |mut req, mut res| {
+    server.handle_get("/telemetry", move | _req, mut res| {
         res.set_ok();
-        let writer = res.into_writer()?;
+        let mut writer = res.into_writer()?;
         {
             let mut ct_storage = match handler_storage_lock.lock() {
                 Ok(gaurd) => gaurd,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            ct_storage.send_readings_shards(&mut writer)?;
         }
         Ok(())
     })?;

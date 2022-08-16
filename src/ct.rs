@@ -1,13 +1,15 @@
-use crate::{now, MAX_TIME_STORAGE_SIZE, set_system_time, ACCESS_TOKEN_SIZE};
+use crate::{now, set_system_time, ACCESS_TOKEN_SIZE, MAX_TIME_STORAGE_SIZE};
 use std::collections::HashSet;
-use std::io::{Seek, Write, Read};
+use std::io::{Read, Seek, Write};
 
 use std::{fs, ops};
 
 use embedded_hal_0_2_7::adc::OneShot;
 
+use embedded_svc::io::Write as SvcWrite;
 use esp_idf_hal::adc::{Atten11dB, PoweredAdc, ADC1};
 use esp_idf_hal::gpio::{Gpio34, Gpio35, Pins};
+use esp_idf_svc::http::server::EspHttpResponseWrite;
 use esp_idf_sys::settimeofday;
 
 use crate::{
@@ -176,14 +178,61 @@ impl CTStorage {
     // Store the given token to storage
     pub(crate) fn store_token(&mut self, token: &[u8]) -> anyhow::Result<()> {
         let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open("/littlefs/token")?;
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open("/littlefs/token")?;
         file.write_all(token)?;
         Ok(())
     }
 
+    // Send reading shards one by one into this writer.
+    // before deleting a shard, we make sure that he have flushed thr writer.
+    pub(crate) fn send_readings_shards(
+        &mut self,
+        writer: &mut EspHttpResponseWrite,
+    ) -> anyhow::Result<()> {
+        let sorted_shard_ids = self.readings_shards.iter().copied().collect::<Vec<i32>>();
+        // a fixed size buffer to avoid stack overflow
+        let mut buf = [0_u8; CT_READING_SIZE * 5];
+        for shard_id in sorted_shard_ids {
+            let mut sent_shard = false;
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(true)
+                .open(format!("/littlefs/ct_readings/{}", shard_id))
+            {
+                loop {
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    writer.write_all(&buf)?;
+                }
+                writer.flush()?;
+                info!(
+                    "Sent shard {}",
+                    format!("/littlefs/ct_readings/{}", shard_id)
+                );
+                sent_shard = true;
+            }
+            // if shard was successfully sent, delete it from storage.
+            if sent_shard {
+                fs::remove_file(format!("/littlefs/ct_readings/{}", shard_id))?;
+                info!(
+                    "Deleted shard {}",
+                    format!("/littlefs/ct_readings/{}", shard_id)
+                );
+                self.readings_shards.remove(&shard_id);
+                // if we have deleted the last shard, reset the counter
+                if shard_id == self.readings_shard_counter {
+                    self.readings_shard_counter = 1;
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn ct_reading_to_le_bytes(ct: &CT) -> anyhow::Result<[u8; CT_READING_SIZE]> {
         let mut buf = [0_u8; CT_READING_SIZE];
