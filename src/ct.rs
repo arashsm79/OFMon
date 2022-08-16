@@ -64,6 +64,48 @@ impl CTStorage {
         }
     }
 
+    // Whenever the esp boots, it restores the previously set RTC and stores that RTC in a log.
+    pub(crate) fn log_powerloss(&mut self) -> anyhow::Result<()> {
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open("/littlefs/powerloss_log")
+        {
+            file.write_all(&now().as_millis().to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    // Dump the powerloss log into the given writer and after that delete the log.
+    pub(crate) fn send_and_clear_powerloss_log(
+        &mut self,
+        writer: &mut EspHttpResponseWrite,
+    ) -> anyhow::Result<()> {
+        let mut powerloss_log_sent = false;
+        // open the log file and send data. If no log is available an empty response is sent.
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open("/littlefs/powerloss_log")
+        {
+            let mut buf = [0_u8; std::mem::size_of::<u128>() * 5];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf)?;
+            }
+            writer.flush()?;
+            powerloss_log_sent = true;
+        }
+        if powerloss_log_sent {
+            std::fs::remove_file("/littlefs/powerloss_log")?;
+        }
+        Ok(())
+    }
+
     /// Find the newest readings shard id
     ///
     /// under "/littlefs/ct_readings" files are saved with a number as their filename.
@@ -198,6 +240,7 @@ impl CTStorage {
         for shard_id in sorted_shard_ids {
             let mut sent_shard = false;
             if let Ok(mut file) = fs::OpenOptions::new()
+                .read(true)
                 .write(true)
                 .create(true)
                 .append(true)

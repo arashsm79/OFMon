@@ -82,10 +82,14 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize CT readings shards
     let storage_lock = Arc::new(Mutex::new(CTStorage::new()));
-    storage_lock
-        .lock()
-        .unwrap()
-        .find_newest_readings_shard_num()?;
+    {
+        let mut ct_storage = match storage_lock.lock() {
+            Ok(gaurd) => gaurd,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ct_storage.find_newest_readings_shard_num()?;
+        ct_storage.log_powerloss();
+    }
 
     // Initialize NVS storage
     // let (default_nvs, _keystore) = init_nvs_storage()?;
@@ -253,14 +257,14 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     let mut server = EspHttpServer::new(&Default::default())?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/", | _req, mut res| {
+    server.handle_get("/", |_req, mut res| {
         res.set_ok();
         res.send_str(&templated_webpage("You should not be here."))?;
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/telemetry", move | _req, mut res| {
+    server.handle_get("/telemetry", move |_req, mut res| {
         res.set_ok();
         let mut writer = res.into_writer()?;
         {
@@ -273,6 +277,19 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
         Ok(())
     })?;
 
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/powerloss_log", move |_req, mut res| {
+        res.set_ok();
+        let mut writer = res.into_writer()?;
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            ct_storage.send_and_clear_powerloss_log(&mut writer)?;
+        }
+        Ok(())
+    })?;
     let handler_storage_lock = storage_lock.clone();
     server.handle_get("/time", move |mut req, mut res| {
         let mut buf = [0_u8; std::mem::size_of::<u64>()];
