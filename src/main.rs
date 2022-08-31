@@ -51,18 +51,18 @@ const AC_PHASE: usize = 1;
 const AC_PHASE: usize = 3;
 
 // ADC constants
-const ADC_BITS: u32 = 12;
-const MAX_READING: u32 = 1 << ADC_BITS;
+// const ADC_BITS: u32 = 12;
+// const MAX_READING: u32 = 1 << ADC_BITS;
 const MAX_MV_ATTEN_11: u16 = 2450;
 const SUPPLY_VOLTAGE: f32 = 3.3;
 const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
 
 // Periodic actions constants
-const SAVE_PERIOD_TIMEOUT: u64 = 120; // 3600 for one hour
+const SAVE_PERIOD_TIMEOUT: u64 = 60; // 3600 for one hour
 
 // Storage constants
-const MAX_SHARD_SIZE: u64 = 256; // in bytes
-const MAX_TIME_STORAGE_SIZE: u64 = 256; // in bytes
+const MAX_SHARD_SIZE: u64 = 64; // in bytes
+const MAX_TIME_STORAGE_SIZE: u64 = 64; // in bytes
 const CT_READING_SIZE: usize = 30; // in bytes
 
 // Network constants
@@ -75,9 +75,8 @@ fn main() -> anyhow::Result<()> {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // return Ok(());
     // Initialize LittleFS storage
-    // let _fs_conf = init_littlefs_storage()?;
+    let _fs_conf = init_littlefs_storage()?;
     info!("Initialized and mounted littlefs storage.");
 
     // Initialize CT readings shards
@@ -87,24 +86,26 @@ fn main() -> anyhow::Result<()> {
             Ok(gaurd) => gaurd,
             Err(poisoned) => poisoned.into_inner(),
         };
+        info!("Finding newest shard.");
         ct_storage.find_newest_readings_shard_num()?;
-        ct_storage.log_powerloss();
+        ct_storage.update_system_time()?;
+        ct_storage.log_powerloss()?;
     }
 
     // Initialize NVS storage
-    // let (default_nvs, _keystore) = init_nvs_storage()?;
+    let (default_nvs, _keystore) = init_nvs_storage()?;
     info!("Initialized default NVS storage.");
 
     // SSID and password for the Wifi access point.
     let mut ap_ssid: String = String::new();
     let ap_password: &str = "12345678";
-    // configure_access_point_ssid(&mut ap_ssid)?;
+    configure_access_point_ssid(&mut ap_ssid)?;
     info!("Configured AP SSID as: {}.", ap_ssid);
 
-    // let _wifi = init_access_point(&ap_ssid, ap_password, default_nvs)?;
+    let _wifi = init_access_point(&ap_ssid, ap_password, default_nvs)?;
     info!("Initialized Wifi.");
 
-    // let _web_server = init_web_server()?;
+    let _web_server = init_web_server(storage_lock.clone())?;
     info!("Initialized Web Server.");
 
     // Initilize peripherals and pins
@@ -124,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     loop {
         for ct in &mut cts {
             ct.calculate_energy(&mut powered_adc1, 200, std::time::Duration::new(3, 0))?;
+            ct.reading.set_time(now().as_millis() as u64);
             info!("Energy Reading: {:?}", ct.reading);
         }
 
@@ -134,8 +136,11 @@ fn main() -> anyhow::Result<()> {
                 Ok(gaurd) => gaurd,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            ct_storage.save_to_storage(&cts)?;
-            ct_storage.store_time(now().as_millis() as u64)?;
+            info!("Got storage lock.");
+            let res = ct_storage.save_to_storage(&cts);
+            println!("{:?}", res);
+            let res = ct_storage.store_time(now().as_millis() as u64);
+            println!("{:?}", res);
 
             // Reset CT readings.
             for ct in &mut cts {
@@ -258,14 +263,14 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
 
     let handler_storage_lock = storage_lock.clone();
     server.handle_get("/", |_req, mut res| {
-        res.set_ok();
         res.send_str(&templated_webpage("You should not be here."))?;
+        log::info!("Request handler done");
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
     server.handle_get("/telemetry", move |_req, mut res| {
-        res.set_ok();
+        log::info!("Handling telemetry reqeuest.");
         let mut writer = res.into_writer()?;
         {
             let mut ct_storage = match handler_storage_lock.lock() {
@@ -274,12 +279,14 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
             };
             ct_storage.send_readings_shards(&mut writer)?;
         }
+        log::info!("Request handler done");
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
     server.handle_get("/powerloss_log", move |_req, mut res| {
-        res.set_ok();
+        log::info!("Handling powerloss log reqeuest.");
+        
         let mut writer = res.into_writer()?;
         {
             let mut ct_storage = match handler_storage_lock.lock() {
@@ -288,10 +295,12 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
             };
             ct_storage.send_and_clear_powerloss_log(&mut writer)?;
         }
+        log::info!("Request handler done");
         Ok(())
     })?;
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/time", move |mut req, mut res| {
+    server.handle_post("/time", move |mut req, mut res| {
+        log::info!("Handling time post request.");
         let mut buf = [0_u8; std::mem::size_of::<u64>()];
         let mut size = 0;
         let mut reader = req.reader();
@@ -316,12 +325,13 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
         }
         set_system_time(time)?;
 
-        res.set_ok();
+        log::info!("Request handler done");
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/token", move |mut req, mut res| {
+    server.handle_post("/token", move |mut req, mut res| {
+        log::info!("Handling token post request.");
         let mut buf = [0_u8; ACCESS_TOKEN_SIZE];
         let mut size = 0;
         let mut reader = req.reader();
@@ -344,7 +354,37 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
             ct_storage.store_token(&token)?;
             println!("Response: {}", std::str::from_utf8(&token)?);
         }
-        res.set_ok();
+        log::info!("Request handler done");
+        Ok(())
+    })?;
+
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/token", move |_req, mut res| {
+        log::info!("Handling token get request.");
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let token_buf = ct_storage.retrieve_token()?;
+            res.send_bytes(&token_buf)?;
+            log::info!("Sent token: {}", std::str::from_utf8(&token_buf)?);
+        }
+        log::info!("Request handler done");
+        Ok(())
+    })?;
+
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/reset", move |_req, mut res| {
+        log::info!("Handling reset request.");
+        {
+            let mut ct_storage = match handler_storage_lock.lock() {
+                Ok(gaurd) => gaurd,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            ct_storage.reset_storage()?;
+        }
+        log::info!("Request handler done");
         Ok(())
     })?;
 
@@ -385,11 +425,12 @@ fn now() -> Duration {
     Duration::from_micros(tv_now.tv_sec as u64 * 1000000_u64 + tv_now.tv_usec as u64)
 }
 
-fn set_system_time(time: u64) -> anyhow::Result<()> {
+fn set_system_time(time_milis: u64) -> anyhow::Result<()> {
     let mut tv_now: timeval = timeval {
-        tv_sec: time as i32,
+        tv_sec: (time_milis as i32 / 1000),
         tv_usec: 0,
     };
-    esp!(unsafe { settimeofday(&mut tv_now as *mut _, core::ptr::null_mut()) });
+    println!("settimeofday sec: {}", tv_now.tv_sec);
+    esp!(unsafe { settimeofday(&mut tv_now as *mut _, core::ptr::null_mut()) })?;
     Ok(())
 }

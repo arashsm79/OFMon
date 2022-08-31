@@ -1,6 +1,6 @@
 use crate::{now, set_system_time, ACCESS_TOKEN_SIZE, MAX_TIME_STORAGE_SIZE};
 use std::collections::HashSet;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use std::{fs, ops};
 
@@ -64,6 +64,23 @@ impl CTStorage {
         }
     }
 
+    //Reset everything and clear all files
+    pub(crate) fn reset_storage(&mut self) -> anyhow::Result<()> {
+        std::fs::remove_file("/littlefs/powerloss_log")?;
+        std::fs::remove_file("/littlefs/time")?;
+        std::fs::remove_dir_all("/littlefs/ct_readings")?;
+        info!("Deleted Everything.");
+        fs::OpenOptions::new().write(true).create(true).open("/littlefs/time")?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open("/littlefs/powerloss_log")?;
+        self.readings_shards = HashSet::new();
+        self.readings_shard_counter = 1;
+        self.find_newest_readings_shard_num()?;
+        Ok(())
+    }
+
     // Whenever the esp boots, it restores the previously set RTC and stores that RTC in a log.
     pub(crate) fn log_powerloss(&mut self) -> anyhow::Result<()> {
         if let Ok(mut file) = fs::OpenOptions::new()
@@ -72,7 +89,9 @@ impl CTStorage {
             .append(true)
             .open("/littlefs/powerloss_log")
         {
+            file.seek(SeekFrom::End(0))?;
             file.write_all(&now().as_millis().to_le_bytes())?;
+            info!("logged powerloss at {}", now().as_millis());
         }
         Ok(())
     }
@@ -100,8 +119,10 @@ impl CTStorage {
             writer.flush()?;
             powerloss_log_sent = true;
         }
+        log::info!("Sent powerloss log");
         if powerloss_log_sent {
             std::fs::remove_file("/littlefs/powerloss_log")?;
+            log::info!("Deleted powerloss log");
         }
         Ok(())
     }
@@ -115,6 +136,7 @@ impl CTStorage {
         let mut max_num = 1;
         if let Ok(paths) = fs::read_dir("/littlefs/ct_readings") {
             for path in paths {
+                info!("Shard: {:?}", path);
                 let num = path?.file_name().to_str().unwrap().parse()?;
                 max_num = i32::max(max_num, num);
                 self.readings_shards.insert(num);
@@ -122,6 +144,20 @@ impl CTStorage {
         } else {
             fs::create_dir("/littlefs/ct_readings")?;
         }
+        self.readings_shard_counter = max_num;
+
+        // if this the first ever shard, we must create it
+        if self.readings_shard_counter == 1 {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(format!(
+                    "/littlefs/ct_readings/{}",
+                    self.readings_shard_counter
+                ))?;
+            info!("Made sure the first shard is created.");
+        }
+        info!("Next shard will be: {:?}", self.readings_shard_counter);
         Ok(())
     }
 
@@ -133,13 +169,21 @@ impl CTStorage {
     /// newer files have a higher number as their filename.
     pub(crate) fn save_to_storage(&mut self, cts: &[CT; AC_PHASE]) -> anyhow::Result<()> {
         // check whether the selected shard has enough size. if it doesn't create a new shard
-        if ((MAX_SHARD_SIZE
+        println!(
+            "shard size {}",
+            fs::metadata(format!(
+                "/littlefs/ct_readings/{}",
+                self.readings_shard_counter
+            ))?
+            .len()
+        );
+        if (MAX_SHARD_SIZE as i64
             - fs::metadata(format!(
                 "/littlefs/ct_readings/{}",
                 self.readings_shard_counter
             ))?
-            .len()) as usize)
-            < CT_READING_SIZE
+            .len() as i64)
+            < CT_READING_SIZE as i64
         {
             self.readings_shard_counter += 1;
             self.readings_shards.insert(self.readings_shard_counter);
@@ -160,11 +204,15 @@ impl CTStorage {
         // Append the readings for each CT at the end of the file
         for ct in cts {
             let buf = CTStorage::ct_reading_to_le_bytes(ct)?;
+            file.seek(SeekFrom::End(0))?;
             file.write_all(&buf)?;
-            info!("Wrote reading: {:?}", ct.reading)
+            info!("Wrote reading: {:?}", ct.reading);
         }
         file.flush()?;
-        info!("Flushed readings to storage.");
+        info!(
+            "Flushed readings to storage and shard size is {}",
+            file.metadata()?.len()
+        );
         Ok(())
     }
 
@@ -173,20 +221,27 @@ impl CTStorage {
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .create(true)
             .open("/littlefs/time")?;
-        file.seek(std::io::SeekFrom::End(-(std::mem::size_of::<u64>() as i64)))?;
-        let mut time_buf = [12_u8; 8];
-        file.read_exact(&mut time_buf)?;
-        let time = u64::from_le_bytes(time_buf);
-        set_system_time(time)?;
+        if file
+            .seek(std::io::SeekFrom::End(-(std::mem::size_of::<u64>() as i64)))
+            .is_ok()
+        {
+            let mut time_buf = [12_u8; 8];
+            if file.read_exact(&mut time_buf).is_ok() {
+                let time = u64::from_le_bytes(time_buf);
+                println!("Found time from storage: {}", time);
+                set_system_time(time)?;
+            }
+        }
         Ok(())
     }
 
     // Store the given time to storage
     pub(crate) fn store_time(&mut self, time: u64) -> anyhow::Result<()> {
-        let mut file = if ((MAX_TIME_STORAGE_SIZE - fs::metadata("/littlefs/time/{}")?.len())
-            as usize)
-            < std::mem::size_of::<u64>()
+        let mut file = if (MAX_TIME_STORAGE_SIZE as i64
+            - fs::metadata("/littlefs/time")?.len() as i64)
+            < std::mem::size_of::<u64>() as i64
         {
             // If the file is full, create a new one overwriting the previous file.
             fs::OpenOptions::new()
@@ -202,7 +257,11 @@ impl CTStorage {
                 .open("/littlefs/time")?
         };
 
+        file.seek(SeekFrom::End(0))?;
         file.write_all(&time.to_le_bytes())?;
+        file.flush()?;
+        info!("Wrote time {} to storage.", time);
+        info!("Time file size {}", file.metadata()?.len());
         Ok(())
     }
 
@@ -211,7 +270,7 @@ impl CTStorage {
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/littlefs/time")?;
+            .open("/littlefs/token")?;
         let mut token = [0_u8; ACCESS_TOKEN_SIZE];
         file.read_exact(&mut token)?;
         Ok(token)
@@ -225,6 +284,7 @@ impl CTStorage {
             .truncate(true)
             .open("/littlefs/token")?;
         file.write_all(token)?;
+        log::info!("Stored toke: {} to storage.", String::from_utf8(token.to_vec())?);
         Ok(())
     }
 
@@ -236,22 +296,17 @@ impl CTStorage {
     ) -> anyhow::Result<()> {
         let sorted_shard_ids = self.readings_shards.iter().copied().collect::<Vec<i32>>();
         // a fixed size buffer to avoid stack overflow
-        let mut buf = [0_u8; CT_READING_SIZE * 5];
+        let mut buf = [0_u8; CT_READING_SIZE];
         for shard_id in sorted_shard_ids {
             let mut sent_shard = false;
             if let Ok(mut file) = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .append(true)
                 .open(format!("/littlefs/ct_readings/{}", shard_id))
             {
-                loop {
-                    let n = file.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    writer.write_all(&buf)?;
+                while file.read_exact(&mut buf).is_ok() {
+                    writer.write(&buf)?;
                 }
                 writer.flush()?;
                 info!(
@@ -274,6 +329,9 @@ impl CTStorage {
                 }
             }
         }
+
+        // make sure a new shard is created
+        self.find_newest_readings_shard_num()?;
         Ok(())
     }
 
@@ -428,11 +486,6 @@ impl CT {
             timestamp: now().as_millis() as u64,
         };
         self.reading += new_reading;
-        info!("Current offset: {}", offset_i);
-        info!("Vol offset: {}", offset_v);
-        info!("n_samples: {}", n_samples);
-        info!("crossing: {}", cross_count);
-        info!("dur: {}", start.elapsed().as_millis());
         Ok(())
     }
 
@@ -558,5 +611,8 @@ impl CTReading {
         self.apparent_power = 0.0;
         self.kwh = 0.0;
         self.timestamp = 0;
+    }
+    pub(crate) fn set_time(&mut self, time: u64) {
+        self.timestamp = time;
     }
 }
