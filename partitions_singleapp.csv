@@ -1,10 +1,14 @@
-# Name,   Type, SubType, Offset,  Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
-# nvs,      24K
+# nvs,      16K
+# otadata,  8K
 # phy_init, 4K
-# factory,  2M
+# ota_0,  1M
+# ota_1,  1M
 # littlefs, 1.9M
-nvs,      data, nvs,     ,        0x6000,
-phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        2M,
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,      0x9000,  0x4000,
+otadata,  data, ota,      0xd000,  0x2000,
+phy_init, data, phy,      0xf000,  0x1000,
+ota_0,    app,  ota_0,    0x10000,  1M,
+ota_1,    app,  ota_1,    ,         1M,
 littlefs, data, spiffs,  ,        0x1e0000,
