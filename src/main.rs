@@ -1,15 +1,16 @@
 mod ct;
+mod ota;
 pub(crate) mod utils;
 
-use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use embedded_svc::http::server::registry::Registry;
 use embedded_svc::http::server::{Request, Response};
-use embedded_svc::http::SendStatus;
-use embedded_svc::io::{Read as SvcRead, Write as SvcWrite};
+use embedded_svc::http::{Headers, SendStatus};
+
+use embedded_svc::io::Read as SvcRead;
 use embedded_svc::ipv4::{Ipv4Addr, Mask, RouterConfiguration, Subnet};
 use embedded_svc::wifi::Wifi;
 use embedded_svc::wifi::{AccessPointConfiguration, ApIpStatus, ApStatus, AuthMethod, Status};
@@ -19,7 +20,6 @@ use esp_idf_svc::nvs::EspDefaultNvs;
 use esp_idf_svc::nvs_storage::EspNvsStorage;
 
 use esp_idf_svc::sysloop::EspSysLoopStack;
-use esp_idf_svc::systime::EspSystemTime;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_sys::{esp, gettimeofday, settimeofday, timeval};
 
@@ -32,6 +32,7 @@ use cstr::cstr;
 use log::{debug, error, info, warn};
 
 use crate::ct::{CTStorage, CT};
+use crate::ota::{first_run_validate, ota_update_from_reader};
 
 // const SINGLE_PHASE_CURRENT_PIN: u8 = 35;
 // const SINGLE_PHASE_VOLTAGE_PIN: u8 = 34;
@@ -50,6 +51,9 @@ const AC_PHASE: usize = 1;
 #[cfg(feature = "three-phase")]
 const AC_PHASE: usize = 3;
 
+// version used for OTA
+const VERSION: u32 = 100;
+
 // ADC constants
 // const ADC_BITS: u32 = 12;
 // const MAX_READING: u32 = 1 << ADC_BITS;
@@ -66,7 +70,7 @@ const MAX_TIME_STORAGE_SIZE: u64 = 64; // in bytes
 const CT_READING_SIZE: usize = 30; // in bytes
 
 // Network constants
-const ACCESS_TOKEN_SIZE: usize = 20;
+const ACCESS_TOKEN_SIZE: usize = 56;
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 fn main() -> anyhow::Result<()> {
@@ -74,6 +78,8 @@ fn main() -> anyhow::Result<()> {
 
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
+
+    println!("SEM Device running version: {}", VERSION);
 
     // Initialize LittleFS storage
     let _fs_conf = init_littlefs_storage()?;
@@ -119,6 +125,9 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut cts = CT::init(pins)?;
     info!("Initialized ADC 1.");
+
+    // If everything is working fine, cancel rollback on the next restart to the previous firmware
+    first_run_validate()?;
 
     // Main Loop
     let mut save_period_start = Instant::now();
@@ -261,15 +270,14 @@ fn init_access_point(
 fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHttpServer> {
     let mut server = EspHttpServer::new(&Default::default())?;
 
-    let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/", |_req, mut res| {
+    server.handle_get("/", |_req, res| {
         res.send_str(&templated_webpage("You should not be here."))?;
         log::info!("Request handler done");
         Ok(())
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/telemetry", move |_req, mut res| {
+    server.handle_get("/telemetry", move |_req, res| {
         log::info!("Handling telemetry reqeuest.");
         let mut writer = res.into_writer()?;
         {
@@ -284,28 +292,28 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/powerloss_log", move |_req, mut res| {
+    server.handle_get("/powerloss_log", move |_req, res| {
         log::info!("Handling powerloss log reqeuest.");
-        
+
         let mut writer = res.into_writer()?;
         {
             let mut ct_storage = match handler_storage_lock.lock() {
                 Ok(gaurd) => gaurd,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            ct_storage.send_and_clear_powerloss_log(&mut writer)?;
+            ct_storage.send_powerloss_log(&mut writer)?;
         }
         log::info!("Request handler done");
         Ok(())
     })?;
     let handler_storage_lock = storage_lock.clone();
-    server.handle_post("/time", move |mut req, mut res| {
+    server.handle_post("/time", move |mut req, _res| {
         log::info!("Handling time post request.");
         let mut buf = [0_u8; std::mem::size_of::<u64>()];
         let mut size = 0;
         let mut reader = req.reader();
         loop {
-            let n = reader.read(&mut buf)?;
+            let n = reader.read(&mut buf[size..])?;
             if n == 0 {
                 break;
             }
@@ -330,13 +338,13 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_post("/token", move |mut req, mut res| {
+    server.handle_post("/token", move |mut req, _res| {
         log::info!("Handling token post request.");
         let mut buf = [0_u8; ACCESS_TOKEN_SIZE];
         let mut size = 0;
         let mut reader = req.reader();
         loop {
-            let n = reader.read(&mut buf)?;
+            let n = reader.read(&mut buf[size..])?;
             if n == 0 {
                 break;
             }
@@ -359,7 +367,7 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/token", move |_req, mut res| {
+    server.handle_get("/token", move |_req, res| {
         log::info!("Handling token get request.");
         {
             let mut ct_storage = match handler_storage_lock.lock() {
@@ -375,7 +383,7 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
     })?;
 
     let handler_storage_lock = storage_lock.clone();
-    server.handle_get("/reset", move |_req, mut res| {
+    server.handle_get("/reset", move |_req, _res| {
         log::info!("Handling reset request.");
         {
             let mut ct_storage = match handler_storage_lock.lock() {
@@ -384,6 +392,43 @@ fn init_web_server(storage_lock: Arc<Mutex<CTStorage>>) -> anyhow::Result<EspHtt
             };
             ct_storage.reset_storage()?;
         }
+        log::info!("Request handler done");
+        Ok(())
+    })?;
+
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_post("/ota", move |mut req, mut res| {
+        log::info!("Handling ota post request.");
+        let version_str_wrapper = req.header("X-FIRMWARE-VERSION");
+        if let Some(version_str) = version_str_wrapper {
+            println!("found header {}", version_str);
+            if let Ok(version) = version_str.parse::<u32>() {
+                println!("found version {}", version);
+                if version > VERSION {
+                    log::info!(
+                        "version: {} is higher than internal VERSION: {}",
+                        version,
+                        VERSION
+                    );
+                    let reader = req.reader();
+                    ota_update_from_reader(reader)?;
+                    res.set_ok();
+                    log::info!("Request handler done");
+                    return Ok(());
+                }
+            }
+        }
+        res.set_status(400);
+        res.set_status_message("Bad Request");
+        log::info!("Request handler done");
+        Ok(())
+    })?;
+
+    let handler_storage_lock = storage_lock.clone();
+    server.handle_get("/version", move |_req, res| {
+        log::info!("Handling version get request.");
+        res.send_str(&VERSION.to_string())?;
+        log::info!("Sent version: {}", VERSION);
         log::info!("Request handler done");
         Ok(())
     })?;
@@ -427,10 +472,10 @@ fn now() -> Duration {
 
 fn set_system_time(time_milis: u64) -> anyhow::Result<()> {
     let mut tv_now: timeval = timeval {
-        tv_sec: (time_milis as i32 / 1000),
+        tv_sec: (time_milis / 1000) as i32,
         tv_usec: 0,
     };
-    println!("settimeofday sec: {}", tv_now.tv_sec);
+    println!("settimeofday milis: {} sec: {}", time_milis, tv_now.tv_sec);
     esp!(unsafe { settimeofday(&mut tv_now as *mut _, core::ptr::null_mut()) })?;
     Ok(())
 }

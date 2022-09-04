@@ -26,12 +26,12 @@ bindings_header = "src/bindings.h"
 esp_idf_version = "branch:release/v4.4"
 esp_idf_tools_install_dir = "global"
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
-esp_idf_components = ["esp_wifi", "spiffs", "vfs", "esp_http_server", "bootloader", "esp_adc", "hal"]
+# esp_idf_components = ["esp_wifi", "spiffs", "vfs", "esp_http_server", "bootloader", "esp_adc_cal", "hal", "esp_websocket_client"]
 
 [dependencies]
 anyhow = {version = "1", features = ["backtrace"]}
 log = "0.4"
-esp-idf-sys = { version = "0.31.7", features = ["binstart"]}
+esp-idf-sys = { version = "0.31.8", features = ["binstart"]}
 esp-idf-svc = { version = "0.42.3", features = ["experimental"]}
 esp-idf-hal = "0.38"
 embedded-svc = { version = "0.22.1", features = ["experimental"]}
@@ -40,5 +40,5 @@ embedded-hal-0-2-7 = { version = "0.2.7", package = "embedded-hal" }
 cstr = "0.2.10"
 
 [build-dependencies]
-embuild = { version = "0.30.2"}
+embuild = { version = "0.30.3"}
 anyhow = "1"

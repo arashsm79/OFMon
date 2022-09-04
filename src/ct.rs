@@ -10,15 +10,12 @@ use embedded_svc::io::Write as SvcWrite;
 use esp_idf_hal::adc::{Atten11dB, PoweredAdc, ADC1};
 use esp_idf_hal::gpio::{Gpio34, Gpio35, Pins};
 use esp_idf_svc::http::server::EspHttpResponseWrite;
-use esp_idf_sys::settimeofday;
 
 use crate::{
     utils::*, AC_PHASE, CT_READING_SIZE, MAX_MV_ATTEN_11, MAX_SHARD_SIZE, NOISE_THRESHOLD,
     SAVE_PERIOD_TIMEOUT, SUPPLY_VOLTAGE,
 };
 
-use anyhow::bail;
-use cstr::cstr;
 #[allow(unused_imports)]
 use log::{debug, error, info, warn};
 struct VoltagePin {
@@ -67,10 +64,8 @@ impl CTStorage {
     //Reset everything and clear all files
     pub(crate) fn reset_storage(&mut self) -> anyhow::Result<()> {
         std::fs::remove_file("/littlefs/powerloss_log")?;
-        std::fs::remove_file("/littlefs/time")?;
         std::fs::remove_dir_all("/littlefs/ct_readings")?;
         info!("Deleted Everything.");
-        fs::OpenOptions::new().write(true).create(true).open("/littlefs/time")?;
         fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -97,11 +92,10 @@ impl CTStorage {
     }
 
     // Dump the powerloss log into the given writer and after that delete the log.
-    pub(crate) fn send_and_clear_powerloss_log(
+    pub(crate) fn send_powerloss_log(
         &mut self,
         writer: &mut EspHttpResponseWrite,
     ) -> anyhow::Result<()> {
-        let mut powerloss_log_sent = false;
         // open the log file and send data. If no log is available an empty response is sent.
         if let Ok(mut file) = fs::OpenOptions::new()
             .write(true)
@@ -117,12 +111,6 @@ impl CTStorage {
                 writer.write_all(&buf)?;
             }
             writer.flush()?;
-            powerloss_log_sent = true;
-        }
-        log::info!("Sent powerloss log");
-        if powerloss_log_sent {
-            std::fs::remove_file("/littlefs/powerloss_log")?;
-            log::info!("Deleted powerloss log");
         }
         Ok(())
     }
@@ -284,7 +272,10 @@ impl CTStorage {
             .truncate(true)
             .open("/littlefs/token")?;
         file.write_all(token)?;
-        log::info!("Stored toke: {} to storage.", String::from_utf8(token.to_vec())?);
+        log::info!(
+            "Stored toke: {} to storage.",
+            String::from_utf8(token.to_vec())?
+        );
         Ok(())
     }
 
@@ -294,11 +285,11 @@ impl CTStorage {
         &mut self,
         writer: &mut EspHttpResponseWrite,
     ) -> anyhow::Result<()> {
-        let sorted_shard_ids = self.readings_shards.iter().copied().collect::<Vec<i32>>();
+        let mut sorted_shard_ids = self.readings_shards.iter().copied().collect::<Vec<i32>>();
+        sorted_shard_ids.sort();
         // a fixed size buffer to avoid stack overflow
         let mut buf = [0_u8; CT_READING_SIZE];
         for shard_id in sorted_shard_ids {
-            let mut sent_shard = false;
             if let Ok(mut file) = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -313,25 +304,8 @@ impl CTStorage {
                     "Sent shard {}",
                     format!("/littlefs/ct_readings/{}", shard_id)
                 );
-                sent_shard = true;
-            }
-            // if shard was successfully sent, delete it from storage.
-            if sent_shard {
-                fs::remove_file(format!("/littlefs/ct_readings/{}", shard_id))?;
-                info!(
-                    "Deleted shard {}",
-                    format!("/littlefs/ct_readings/{}", shard_id)
-                );
-                self.readings_shards.remove(&shard_id);
-                // if we have deleted the last shard, reset the counter
-                if shard_id == self.readings_shard_counter {
-                    self.readings_shard_counter = 1;
-                }
             }
         }
-
-        // make sure a new shard is created
-        self.find_newest_readings_shard_num()?;
         Ok(())
     }
 
@@ -476,7 +450,8 @@ impl CT {
         // Calculate power values
         let real_power = f32::abs(v_ratio * i_ratio * (sum_p / n_samples as f32));
         let apparent_power = v_rms * i_rms;
-        let kwh = real_power * start.elapsed().as_secs_f32() / SAVE_PERIOD_TIMEOUT as f32;
+        let kwh =
+            (real_power / 1000.0) * start.elapsed().as_secs_f32() / SAVE_PERIOD_TIMEOUT as f32;
         let new_reading = CTReading {
             real_power,
             apparent_power,

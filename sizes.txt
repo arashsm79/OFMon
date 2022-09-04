@@ -1,0 +1,37 @@
+# Size optimizations. Disable for development
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_ESP32_REV_MIN_0=y
+
+I (94) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=166d0h ( 91856) map
+I (136) esp_image: segment 1: paddr=000266f8 vaddr=3ffb0000 size=02dd0h ( 11728) load
+I (141) esp_image: segment 2: paddr=000294d0 vaddr=40080000 size=06b48h ( 27464) load
+I (153) esp_image: segment 3: paddr=00030020 vaddr=400d0020 size=b2ee0h (732896) map
+I (418) esp_image: segment 4: paddr=000e2f08 vaddr=40086b48 size=0bb88h ( 48008) load
+I (438) esp_image: segment 5: paddr=000eea98 vaddr=50000000 size=00010h (    16) load
+total: 0xd2ed8 bytes
+total: 863960  bytes
+
+573 segments
+
+#######################################################
+
+# Size optimizations. Disable for development
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_ESP32_REV_MIN_0=y
+
+I (94) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=1cc9ch (117916) map
+I (145) esp_image: segment 1: paddr=0002ccc4 vaddr=3ffb0000 size=02fa4h ( 12196) load
+I (150) esp_image: segment 2: paddr=0002fc70 vaddr=40080000 size=003a8h (   936) load
+I (151) esp_image: segment 3: paddr=00030020 vaddr=400d0020 size=b5338h (742200) map
+I (428) esp_image: segment 4: paddr=000e5360 vaddr=400803a8 size=1262ch ( 75308) load
+I (459) esp_image: segment 5: paddr=000f7994 vaddr=50000000 size=00010h (    16) load
+total: 0xd6592 bytes
+total: 877970  bytes
+
+592 segments
