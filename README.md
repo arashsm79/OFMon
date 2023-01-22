@@ -1,4 +1,5 @@
 # Offile-first Smart Energy Montoring
+> Associated mobile app available [here](https://github.com/arashsm79/OFMonMobile).
 
 There have been numerous smart energy monitoring systems based on the Internet of things (IoT). In most of these systems, the end devices are directly connected to a network and are continuously sending out their data. This poses a real challenge in environments where a reliable wireless connection is not always available, e.g., inside containers, remote locations, or even in places where there is simply no proper infrastructure for wireless communication.
 
