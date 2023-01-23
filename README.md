@@ -1,7 +1,10 @@
 # Offile-first Smart Energy Montoring
 > Associated mobile app available [here](https://github.com/arashsm79/OFMonMobile).
 * [Introduction](#Introduction)
-* Rust and ESP32
+* [Rust and ESP32](#Rust-and-ESP32)
+* [Software Packages Needed for Rust Development on ESP32](#Software-Packages-Needed-for-Rust-Development-on-ESP32)
+* [References](#References)
+
 
 
 # Introduction
@@ -13,8 +16,8 @@ A Current transformer is connected to the ADC subsystem of ESP32 microcontroller
 
 The filesystem used for flash storage is of utmost importance. We have chosen LittleFS since it is power- loss resilient and has wear leveling mechanisms for flash storage. It also uses constant RAM to work with any kind of data. Some parts of the flash storage have been reserved for Over-the-Air (OTA) updates, but the majority of the flash storage is formatted with the LittleFS file system. The devices are identified using their server-side representation token which is given to them on their first time initialization using the mobile app. The mobile app also maintains a list of the devices it has connected to and fetches their server-side information when a connection is available. This information is shown alongside the devices’ SSID when scanning for access points. After collecting the data from the devices and syncing it with the Thingsboard server, customers with a few devices or operators with tens of devices can view their data both on the mobile app and on the
 Thingsboard web app.
-<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930124-dffb86d8-de19-46cb-a774-2703518b55a3.png" width="400"></p>
-<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930133-bd489857-3335-40f6-89e1-6c59d2b6c26b.png" width="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930124-dffb86d8-de19-46cb-a774-2703518b55a3.png" height="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930133-bd489857-3335-40f6-89e1-6c59d2b6c26b.png" height="400"></p>
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930161-31927390-57aa-4144-a046-2c2bfc2b6901.png" width="400"></p>
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930168-805bd5f9-acce-4bae-a7e6-09efd210719a.png" width="400"></p>
 
@@ -49,6 +52,18 @@ And to create a binary file suitable for OTA use:
 ```shell
 $ espflash save-image --partition-table partitions_singleapp.csv ESP32 target/xtensa-esp32-espidf/release/sem sem103
 ```
+
+# Filesystem
+In order to be able to store and manage a lot of data in the flash memory of the microcontroller, we need a file system. According to our needs, this file system should do three things:
+* Be resistant to power outages. Microcontrollers that are used to monitor the power flow may be interrupted at any moment, and this sudden event should not cause the stored data structures to suffer and the system to be in an unknown state.
+* RAM memory in microcontrollers is very limited, and regardless of the size of the file in the memory and the number of files, the use of RAM should be constant and not change with the increase of input.
+* Flash memories have a limited number of write cycles, and if a physical part of the flash is written a large number of times (usually 10,000 to 100,000 times), that part will be damaged. Therefore, the file system must take care to use all memory blocks to spread the depreciation over all blocks.
+After my research I have come to the conclusion that there are generally three file systems used for flash memory in microcontrollers. These three file systems and the NVS method, which stores values in memory as key and value pairs and is not considered a file system, have been compared together. [[2]](#2)
+
+[SPIFFS](https://github.com/pellepl/spiffs) and [LittleFS](https://github.com/littlefs-project/littlefs) seem to be good options. Examining the repository related to SPIFFS, we find that there is not much development for this file system and the project is almost abandoned. But LittleFS shows a lot of potential.
+LittleFS is constantly being developed and has a fairly large community behind it. The MicroPython project also uses this file system by default. This relatively new file system uses the Copy-on-Write method, in the simplest case, it works in such a way that when a branch is changed in the file system tree, the whole branch is copied somewhere else and then the change is applied. The previous branch is marked deleted by changing a flag that indicates it no longer has the correct value. With this method, there is no need to erase the memory unnecessarily and use flash memory writing cycles, and you can also make sure that if a problem occurs during writing or the power is cut off, because the values are copied before changing, the original values will not be tampered with. They remain valid until the write is complete. It should be noted that many optimizations are used in this file system to improve the efficiency of the COW method, the details of which are available in the project documentation.  [[3]](#3)
+
+This file system is not suitable for situations where it is necessary to change the middle of a large file, because since the entire file is copied before the change, the entire memory space may be filled due to this copy and the continuation of the file may have problems. But this problem does not exist if we just add something to the end of the file. But it is still generally better to avoid increasing the size of each file, which we will do with the sharding method.
 
 # References
 * <a id="1">[1]</a> [esp-rs book](https://esp-rs.github.io/book/introduction.html)
