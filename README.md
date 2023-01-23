@@ -93,6 +93,24 @@ As explained earlier, using large files to write to LittleFS is not highly recom
 The hardware that we had at hand did not include a separate RTC module and it was not possible to make any changes to the hardware. Therefore, since the timestamps related to the readings are recorded in the device, to improve the error caused by power failure, the microcontroller periodically stores its RTC value in the flash memory and every time it starts working, the stored RTC value is read from the memory and is set as the system clock. After setting the clock, it appends the RTC value read from the memory in a file called powerloss_log.
 When receiving values from the microcontroller by the mobile application, the list of power failure events is also sent, and the mobile application tries to correct the timestamp of the data as much as possible by calculating the total duration of the power failure experienced by the microcontroller.
 
+# Rust program routine
+At the beginning of the program, we launch the file system. This setup will format the LittleFS partition for the first time and only mounts it in the next times.
+The Rust program is executed as a Task in the FreeRTOS operating system that esp-idf uses, and other tasks such as handling requests by the web server is done in other tasks. Therefore, since the microcontroller that I was using has more than one core, it is possible to run the main Rust code in parallel with the code related to the web server handlers. Thus,to prevent data race, a Mutex can be used for all operations that need to work with the file system. In the next step, we create a mutex with the LittleFS handle behind it.
+It then finds the latest shard to store readings in and executes the RTC and power-down routines discussed earlier.
+In the next step, the wifi system is set up. In this step, Micro sets up an access point; The ssid of this access point also includes the MAC address of the micro, so when several micros are together, they can still be distinguished individually.
+After that, the web server and all its handlers are started and registered, and then the ADC micro system is started. Web server handlers are explained in more detail below.
+In the next part, after making sure that the above steps are started, the firmware version that is currently running is confirmed. This is to ensure correct OTA update. For example, if a wrong update is done through OTA and the initial setup fails or the micro is reset due to an error, because the current version is not verified, the micro will automatically go to the previous version that worked properly.
+In the final stage, the micro enters a loop that periodically reads and aggregates the values from the sensor, and stores the aggregated values in the memory after one hour.
+
+## Webserver
+After running the web server, the following handlers are registered in it:
+* /telemetry: the data of all shards is sent to the requester in binary form and in http chunk format.
+* /powerloss_log: All data related to power loss is sent to the requester.
+* /time: The new clock is received in unix epoch time format and RTC is set with it.
+* /token: if the request is a GET, the current token is sent, and if it is a POST, the sent token is stored in the current token array. The use of the token is explained below.
+* /reset: All information except time is erased from the memory.
+* /ota: The data related to the new version of the program is received as a chunk and placed in the next OTA partition. If the binary file is received correctly, the new partition will be set as a bootable partition in the OTA header. OTA update happens only when the received version is higher than the current version.
+* /version: Sends the current version to the requester.
 
 # References
 * <a id="1">[1]</a> [esp-rs book](https://esp-rs.github.io/book/introduction.html)
