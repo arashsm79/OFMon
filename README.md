@@ -13,11 +13,10 @@ A Current transformer is connected to the ADC subsystem of ESP32 microcontroller
 
 The filesystem used for flash storage is of utmost importance. We have chosen LittleFS since it is power- loss resilient and has wear leveling mechanisms for flash storage. It also uses constant RAM to work with any kind of data. Some parts of the flash storage have been reserved for Over-the-Air (OTA) updates, but the majority of the flash storage is formatted with the LittleFS file system. The devices are identified using their server-side representation token which is given to them on their first time initialization using the mobile app. The mobile app also maintains a list of the devices it has connected to and fetches their server-side information when a connection is available. This information is shown alongside the devices’ SSID when scanning for access points. After collecting the data from the devices and syncing it with the Thingsboard server, customers with a few devices or operators with tens of devices can view their data both on the mobile app and on the
 Thingsboard web app.
-
-![image](https://user-images.githubusercontent.com/57039957/213930124-dffb86d8-de19-46cb-a774-2703518b55a3.png)
-![image](https://user-images.githubusercontent.com/57039957/213930133-bd489857-3335-40f6-89e1-6c59d2b6c26b.png)
-![image](https://user-images.githubusercontent.com/57039957/213930161-31927390-57aa-4144-a046-2c2bfc2b6901.png)
-![image](https://user-images.githubusercontent.com/57039957/213930168-805bd5f9-acce-4bae-a7e6-09efd210719a.png)
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930124-dffb86d8-de19-46cb-a774-2703518b55a3.png" width="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930133-bd489857-3335-40f6-89e1-6c59d2b6c26b.png" width="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930161-31927390-57aa-4144-a046-2c2bfc2b6901.png" width="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/213930168-805bd5f9-acce-4bae-a7e6-09efd210719a.png" width="400"></p>
 
 # Rust and ESP32
 Rust programming language has attracted the attention of many companies today. This language allows programmers to write safe programs with concepts such as Ownership and Borrowing and new programming structures. During compilation, this language can guarantee that your program will not encounter many types of errors that were common in older languages such as C.
@@ -26,18 +25,20 @@ Espressif has designed a framework for programming its microcontrollers, which i
 Over the last few years, the company has started a movement to make it possible to use esp-idf, which is written in C, in the Rust language using FFI, or Foreign Function Interface. Using FFI, code written in one language can be called in another language and its return value can be retrieved. All the work done in this regard is in the [esp-rs](https://github.com/esp-rs) repository and the development of all these programs is done as open source on Github.
 
 At the time of writing this, two categories of programs are being developed:
-     * Programs that are completely written in Rust and are so-called bare-metal. That is, they are very close to hardware and do not need Rust's standard library. Like: [esp-hal](https://github.com/esp-rs/esp-hal)
-     * Programs that use the esp-idf API through FFI instead of implementing everything from scratch in Rust. These programs must use the Rust standard library because they use functions needed to communicate with C and esp-idf, and therefore require std. For example: [esp-idf-hal](https://github.com/esp-rs/esp-idf-hal)
+* Programs that are completely written in Rust and are so-called bare-metal. That is, they are very close to hardware and do not need Rust's standard library. Like: [esp-hal](https://github.com/esp-rs/esp-hal)
+* Programs that use the esp-idf API through FFI instead of implementing everything from scratch in Rust. These programs must use the Rust standard library because they use functions needed to communicate with C and esp-idf, and therefore require std. For example: [esp-idf-hal](https://github.com/esp-rs/esp-idf-hal)
+
 Using the first category is almost impossible due to the immaturity and lack of preparation of many APIs required in industrial work. So currently, most people use the second category, which is based on the tested and advanced esp-idf framework. [[1]](#1)
 
 # Software Packages Needed for Rust Development on ESP32
 In the Rust language, a crate is the smallest unit recognized by the Rust compiler. In general, crates can be considered a software package or a project.
 The following packages are used in developing Rust applications with esp-idf:
-     * [embedded-hall](https://github.com/esp-rs/embedded-hal): This package contains a set of programming interfaces or traits for using HAL in embedded environments and does not include any code related to a specific microcontroller.
-     * [esp-idf-hal](https://github.com/esp-rs/esp-idf-hal): This package is the implementation of embedded-hal for ESP32 microcontrollers through esp-idf.
-     * [embedded-svc](https://github.com/esp-rs/embedded-svc): This package contains a set of programming interfaces or traits for using different services such as wifi, bluetooth and httpd in embedded environments and does not include any code related to a specific microcontroller.
-     * [esp-idf-svc](https://github.com/esp-rs/esp-idf-svc): this package is the implementation of embedded-svc for ESP32 microcontrollers through esp-idf.
-     * [esp-idf-sys](https://github.com/esp-rs/esp-idf-sys): This package provides raw and insecure connections to the esp-idf library written in C.
+* [embedded-hall](https://github.com/esp-rs/embedded-hal): This package contains a set of programming interfaces or traits for using HAL in embedded environments and does not include any code related to a specific microcontroller.
+* [esp-idf-hal](https://github.com/esp-rs/esp-idf-hal): This package is the implementation of embedded-hal for ESP32 microcontrollers through esp-idf.
+* [embedded-svc](https://github.com/esp-rs/embedded-svc): This package contains a set of programming interfaces or traits for using different services such as wifi, bluetooth and httpd in embedded environments and does not include any code related to a specific microcontroller.
+* [esp-idf-svc](https://github.com/esp-rs/esp-idf-svc): this package is the implementation of embedded-svc for ESP32 microcontrollers through esp-idf.
+* [esp-idf-sys](https://github.com/esp-rs/esp-idf-sys): This package provides raw and insecure connections to the esp-idf library written in C.
+
 Also, since most ESP32 microcontrollers use the Xtensa architecture and this architecture is not supported by default by the Rust compiler and its backend, which is LLVM, Espressif maintains a [fork](https://github.com/esp-rs/rust-build) of the Rust compiler that supports this architecture. To get started, this fork of the Rust compiler must be downloaded and installed.
 The rest of the software needed to flash and monitor the microcontroller and other tips can be found in the [Espressif documentation](https://esp-rs.github.io/book/introduction.html) for Rust programming. There is a step-by-step tutorial on how to set up a Rust project in these documents, and it is recommended to read them. [[1]](#1)
 To flash, it is enough to install the espflash program from the tutorial above and use the following command to flash the binary file placed in the project on the microcontroller:
