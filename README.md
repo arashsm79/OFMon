@@ -8,6 +8,8 @@
 * [Using LittleFS in Rust](#Using-LittleFS-in-Rust)
 * [Sharding](#Sharding)
 * [Dealing with power outages](#Dealing-with-power-outages)
+* [Rust program routine](#Rust-program-routine)
+  * [Webserver](#Webserver)   
 * [References](#References)
 
 
@@ -111,6 +113,97 @@ After running the web server, the following handlers are registered in it:
 * /reset: All information except time is erased from the memory.
 * /ota: The data related to the new version of the program is received as a chunk and placed in the next OTA partition. If the binary file is received correctly, the new partition will be set as a bootable partition in the OTA header. OTA update happens only when the received version is higher than the current version.
 * /version: Sends the current version to the requester.
+
+# Flash memory partitioning
+The file below is given as a partition table to the software that flashes the program to create the partitions in the flash memory:
+```config
+# Name, Type, SubType, Offset, Size, Size in Bytes
+nvs, data, nvs, 0x9000, 0x4000, 16k
+otadata, data, ota, 0xd000, 0x2000, 8k
+phy_init, data, phy, 0xf000, 0x1000, 4k
+ota_0, app, ota_0, 0x10000, 1M, 1M
+ota_1, app, ota_1, , 1M, 1M
+littlefs, data, spiffs, , 0x1e0000,1.9M
+```
+As you can see, two partitions are considered for OTA; Each time a new program is downloaded as a binary file, one of the OTA partitions is used. The otadata partition specifies which partition the bootloader should run from during boot.
+nvs partition is used for wifi and phy_init partition is used for physical layer and radio. Finally, the littlefs partition corresponds to the littlefs file system where data is stored. [[5]](#5)
+
+# Thingsboard platform
+Thingsboard is one of the most famous Internet of Things platforms that is completely open source and is used all over the world. Installation and commissioning of Thingsboard server was done through docker on a VM created in proxmox.
+Thingsboard can be used for:
+* Device management
+* Receive and store data that devices send
+* Process data from devices and perform various tasks based on that data, such as sending an email or running a piece of code.
+* Displaying data in different graphs
+* Creating and launching firmware updates through OTA
+* Creating different user accounts with different access levels
+* And …
+Devices in this platform have names and descriptions, and each device is given a unique access token when it is created. Devices can send their data directly to the server with their token to the following endpoint in a specified format:
+```
+http://<server-address>/api/v1/<token>/telemetry
+```
+Each device is also located in a profile; Profiles are used to separate and group devices that perform the same task and must be managed together. For example, when using OTA update, we can present a new version of the binary file uploaded to the server to all devices that are in a profile, or when drawing a graph, we can display the data of all devices that are in a specific profile. [[4]](#4)[[8]](#8)
+
+# Thingsboard Flutter mobile app
+Thingsboard also has a mobile app written with the flutter framework called [thingsboard_flutter](https://github.com/thingsboard/flutter_thingsboard_app), which allows users to view and interact with their dashboards and see graphs of device data. One of the things that was done, and we will talk about it further, is to fork this program and add the ability to collect offline data from devices and send it to the server. In the figure below, you can see a view of the added tab called collect:
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214007538-20991e23-d3e7-49b3-83df-9bf09bc33e3e.png" height="400"></p>
+
+# Scan nearby access points
+The [wifi_iot](https://github.com/flutternetwork/WiFiFlutter/tree/master/packages/wifi_iot) library is used to scan and find nearby devices. This library can return the list of all nearby APs and connect to the requested AP by giving it an ssid. By default, the ssid of all devices with `SEM-` in the beginning is displayed, and therefore it is easy to display only the APs related to the required devices from the list of all nearby APs. Finally, the user can connect to the desired AP by clicking on it.
+
+# Initial setup of the device
+After connecting to the device's AP and before doing anything else, three things need to be done with the device:
+* The token related to the device representation on the server should be given to the device. With this, every time the mobile application wants to get data from a device, it also gets its token and stores it in its database. To copy the token, a section has been added in the Devices tab through which users can click on the desired device and copy the corresponding token. After copying the token, it can be pasted in the field specified during the initial startup of the device.
+* Send the current time in unix epoch time format to the device to update its RTC. If you are connected to the Internet, this time is taken online, and otherwise, the time of the mobile phone itself is used.
+* The memory of the device should be reset to make sure that no unwanted data remains in the memory.
+Finally, a record is created in the database for this device that associates the ssid of the AP we are connected to to the device token. Also, the timestamp of the last connection to this ssid is also recorded in this record. With this, for example, when scanning, we can separate all the devices that we have connected to in the last 10 minutes with a different color.
+
+# Receiving data from the device
+To receive information from the device, the following procedure is performed:
+* First, the device token is taken.
+* Then all the information about the readings is taken from the device.
+* The updated time is sent to the device.
+* A list of all power outage events is taken.
+* Binary readings are converted to their corresponding objects.
+* The difference between the time of the last data sent and the current time indicates the amount of power outage. If this amount is more than one hour, we divide it by the number of power outage events; The obtained number should be placed in the places where there is a power outage, which we obtain using the power outage event.
+* Finally, the readings are stored in the mobile database and a request is sent to reset the device's memory.
+
+
+# ER diagram and database architecture
+The ER diagram of the database used in mobile is as follows:
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009672-edab321e-04da-4634-a992-9c27f8d1c14e.png" height="400"></p>
+
+As you can see, all the devices are placed in the devices table. The token given to each device is a combination of the access token and its device profile id on the thingsboard server. So after connecting to a device, its token is first taken and placed in this table along with its ssid. This feature has been added that after connecting to the Internet and entering the All Devices section of the mobile app, the name assigned to each device on the server is added to this database; This is actually a link between a device's ssid and its name on the server, which can be used to display each device's name next to it when scanning for APs.
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009684-6d126f7b-7145-4ccc-9d2c-2a8cf6b584a9.png" height="400"></p>
+
+The last_checked field shows the time of the last time the mobile phone was connected to the device. If this time is less than ten minutes ago, when scanning for APs, the corresponding AP of the device will turn green to make it easier for the user to identify which device to connect to in the next step.
+
+
+# Perform OTA via mobile
+The ota table is for managing otas and their binary files. Every time the user enters the Devices tab, the mobile application automatically checks through the server whether there is a new OTA update for the devices registered in the mobile database, and if there is, it downloads it.
+OTA updates work based on device profile, and when checking for OTA, it is checked that the version on the server is greater than the version stored on the device, and if it is, the new version is downloaded and replaces the previous version.
+When connecting to the device, the program version of the device and its device profile id are taken first, and if there is a newer update file for it, the user can update the device by selecting the Update Device Firmware option.
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009698-a229f132-d584-4c25-af40-73bdd9fefcb8.png" height="400"></p>
+
+
+# Sending readings to the server
+By selecting the Sync With Server option, the user can send readings related to any device stored in their database to the server. This is possible because in the mobile database, all access tokens of the devices are also stored, and as mentioned earlier, to send the readings to the server, it is enough to send the data in the specified format to the following address:
+```
+http://<server-address>/api/v1/<token>/telemetry
+```
+
+# Display data on the server side
+To display data on the thingsboard server, we need to design a dashboard so that the graph of all the devices that are in the SEM profile can be displayed on this dashboard. The designed charts are:
+* Pie chart to compare total energy consumption of devices
+* Three graphs to display kwh in time intervals: hourly, daily and monthly
+* Graph of average hourly current and voltage consumption (the voltage value is constant)
+Below is an image of the designed dashboard:
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009791-8c2685f9-d132-4330-99fe-4d2d34b6bbec.png" height="400"></p>
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009813-76c19864-3214-4307-94a4-2f40a28cca59.png" height="400"></p>
+
+
+# Conclusion
+I have implemented an Internet of Things platform for power consumption monitoring based on ESP32 processors and Thingsboard server. One of the main problems that current IoT systems have is the need to constantly connect to a server or gateway; My method solves this problem by means of mobile application and using the AP capability of ESP32 microcontrollers with emphasis on offline operation. In this way, the mobile application acts as a gateway that connects to the devices and receives their data. In the future, an autopilot mode can be created for the mobile app to collect data from devices automatically; Of course, this is not possible in the Android operating system because applications do not have the right to do this without notifying the user and approving the application.
 
 # References
 * <a id="1">[1]</a> [esp-rs book](https://esp-rs.github.io/book/introduction.html)
