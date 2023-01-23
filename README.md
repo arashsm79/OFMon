@@ -3,6 +3,8 @@
 * [Introduction](#Introduction)
 * [Rust and ESP32](#Rust-and-ESP32)
 * [Software Packages Needed for Rust Development on ESP32](#Software-Packages-Needed-for-Rust-Development-on-ESP32)
+* [Filesystem](#Filesystem)
+* [Measuring current and voltage using SCT sensors](#Measuring-current-and-voltage-using-SCT-sensors)
 * [References](#References)
 
 
@@ -61,9 +63,21 @@ In order to be able to store and manage a lot of data in the flash memory of the
 After my research I have come to the conclusion that there are generally three file systems used for flash memory in microcontrollers. These three file systems and the NVS method, which stores values in memory as key and value pairs and is not considered a file system, have been compared together. [[2]](#2)
 
 [SPIFFS](https://github.com/pellepl/spiffs) and [LittleFS](https://github.com/littlefs-project/littlefs) seem to be good options. Examining the repository related to SPIFFS, we find that there is not much development for this file system and the project is almost abandoned. But LittleFS shows a lot of potential.
-LittleFS is constantly being developed and has a fairly large community behind it. The MicroPython project also uses this file system by default. This relatively new file system uses the Copy-on-Write method, in the simplest case, it works in such a way that when a branch is changed in the file system tree, the whole branch is copied somewhere else and then the change is applied. The previous branch is marked deleted by changing a flag that indicates it no longer has the correct value. With this method, there is no need to erase the memory unnecessarily and use flash memory writing cycles, and you can also make sure that if a problem occurs during writing or the power is cut off, because the values are copied before changing, the original values will not be tampered with. They remain valid until the write is complete. It should be noted that many optimizations are used in this file system to improve the efficiency of the COW method, the details of which are available in the project documentation.  [[3]](#3)
+LittleFS is constantly being developed and has a fairly large community behind it. The MicroPython project also uses this file system by default. This relatively new file system uses the Copy-on-Write method, in the simplest case, it works in such a way that when a branch is changed in the file system tree, the whole branch is copied somewhere else and then the change is applied. The previous branch is marked deleted by changing a flag that indicates it no longer has the correct value. With this method, there is no need to erase the memory unnecessarily and use flash memory writing cycles, and you can also make sure that if a problem occurs during writing or the power is cut off, because the values are copied before changing, the original values will not be tampered with. They remain valid until the write is complete. It should be noted that many optimizations are used in this file system to improve the efficiency of the COW method, the details of which are available in the project documentation. [[3]](#3)
 
 This file system is not suitable for situations where it is necessary to change the middle of a large file, because since the entire file is copied before the change, the entire memory space may be filled due to this copy and the continuation of the file may have problems. But this problem does not exist if we just add something to the end of the file. But it is still generally better to avoid increasing the size of each file, which we will do with the sharding method.
+
+# Measuring current and voltage using SCT sensors
+
+These sensors are connected as a clip around the current carrying wire. The current inside the wire passes through a thick metal ring inside the clip and induces a current inside this ring. Another coil with a specific number of turns is connected to the metal ring, and when a current is induced in the big ring, another current proportional to it is induced in the coil; This ratio is determined by the number of coil turns. So if, for example, 100 amps are passed through the desired wire, depending on the number of small coil loops, the output current of the sensor can be something like 10 milliamps. [[6]](#6)
+To read the output of the sensors, they are connected through a 3.5 mm jack converter to the pins of the microcontroller that have ADC capability. Since we are going to be working with city AC power, we can calculate the RMS current and voltage using readings from several sensor outputs. The point that should be noted is that the ADC output is a positive number between 0 and n depending on its resolution, and therefore it is necessary to find the middle of the sine wave corresponding to the electric current and subtract it from the whole wave to get our numbers. around 0. This number to be subtracted is known as the DC offset, which is shown in below. [[7]](#7)
+
+<p align="center"><img src="https://user-images.githubusercontent.com/57039957/214002385-c5b7fc50-0502-45d7-8dc1-a736d5be2a68.png" width="400"></p>
+
+The algorithm:
+* First, we find the middle value of the voltage in a loop. This is easily done by having the maximum value that the ADC can output.
+* Then, in another loop, we continuously read the voltage and current values until the time ends or a certain number of passes through the middle of the wave has been done, then we apply a low-pass filter, and finally collect the readings in the necessary variables. During this time, we store the minimum and maximum value read for current and voltage, and after the loop is finished, we improve the offset value, which is the middle value in the wave.
+* At the end, we calculate the RMS values for voltage and current and get the real and apparent energy and kwh. You get the kwh value cumulatively; That is, when the corresponding function is called, the kwh values are added together and whenever we reach an hour, the kwh value will have the correct value for that hour.
 
 # References
 * <a id="1">[1]</a> [esp-rs book](https://esp-rs.github.io/book/introduction.html)
