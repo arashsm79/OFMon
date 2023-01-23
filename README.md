@@ -5,6 +5,9 @@
 * [Software Packages Needed for Rust Development on ESP32](#Software-Packages-Needed-for-Rust-Development-on-ESP32)
 * [Filesystem](#Filesystem)
 * [Measuring current and voltage using SCT sensors](#Measuring-current-and-voltage-using-SCT-sensors)
+* [Using LittleFS in Rust](#Using-LittleFS-in-Rust)
+* [Sharding](#Sharding)
+* [Dealing with power outages](#Dealing-with-power-outages)
 * [References](#References)
 
 
@@ -78,6 +81,18 @@ The algorithm:
 * First, we find the middle value of the voltage in a loop. This is easily done by having the maximum value that the ADC can output.
 * Then, in another loop, we continuously read the voltage and current values until the time ends or a certain number of passes through the middle of the wave has been done, then we apply a low-pass filter, and finally collect the readings in the necessary variables. During this time, we store the minimum and maximum value read for current and voltage, and after the loop is finished, we improve the offset value, which is the middle value in the wave.
 * At the end, we calculate the RMS values for voltage and current and get the real and apparent energy and kwh. You get the kwh value cumulatively; That is, when the corresponding function is called, the kwh values are added together and whenever we reach an hour, the kwh value will have the correct value for that hour.
+
+# Using LittleFS in Rust
+To use LittleFS in the esp-idf environment, you can use the [esp-littlefs](https://github.com/joltwallet/esp_littlefs) project. As in normal C projects, you can add this package as a component to your project and use standard C functions to work with the file the system.
+But to use esp-little in Rust, you need the help of esp-idf-sys. In the Rust project settings, we specify that when compiling the program, it should create the necessary binding to use this file system in Rust.
+
+# Sharding
+As explained earlier, using large files to write to LittleFS is not highly recommended; Therefore, instead of having a large file in the system that will be written into for months which reduces the system's performance, we can use sharding to solve this problem. In this way, a fixed size is set for each file, and if the size exceeds that limit when writing, a new file will be created and the system will write the values in that new file from then on. This method is also widely used in databases to avoid handling large files. [[9]](#9)
+
+# Dealing with power outages
+The hardware that we had at hand did not include a separate RTC module and it was not possible to make any changes to the hardware. Therefore, since the timestamps related to the readings are recorded in the device, to improve the error caused by power failure, the microcontroller periodically stores its RTC value in the flash memory and every time it starts working, the stored RTC value is read from the memory and is set as the system clock. After setting the clock, it appends the RTC value read from the memory in a file called powerloss_log.
+When receiving values from the microcontroller by the mobile application, the list of power failure events is also sent, and the mobile application tries to correct the timestamp of the data as much as possible by calculating the total duration of the power failure experienced by the microcontroller.
+
 
 # References
 * <a id="1">[1]</a> [esp-rs book](https://esp-rs.github.io/book/introduction.html)
