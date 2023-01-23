@@ -102,27 +102,28 @@ But to use esp-little in Rust, you need the help of esp-idf-sys. In the Rust pro
 # Sharding
 As explained earlier, using large files to write to LittleFS is not highly recommended; Therefore, instead of having a large file in the system that will be written into for months which reduces the system's performance, we can use sharding to solve this problem. In this way, a fixed size is set for each file, and if the size exceeds that limit when writing, a new file will be created and the system will write the values in that new file from then on. This method is also widely used in databases to avoid handling large files. [[9]](#9)
 
+
 # Dealing with power outages
 The hardware that we had at hand did not include a separate RTC module and it was not possible to make any changes to the hardware. Therefore, since the timestamps related to the readings are recorded in the device, to improve the error caused by power failure, the microcontroller periodically stores its RTC value in the flash memory and every time it starts working, the stored RTC value is read from the memory and is set as the system clock. After setting the clock, it appends the RTC value read from the memory in a file called powerloss_log.
 When receiving values from the microcontroller by the mobile application, the list of power failure events is also sent, and the mobile application tries to correct the timestamp of the data as much as possible by calculating the total duration of the power failure experienced by the microcontroller.
 
 # Rust program routine
-At the beginning of the program, we launch the file system. This setup will format the LittleFS partition for the first time and only mounts it in the next times.
-The Rust program is executed as a Task in the FreeRTOS operating system that esp-idf uses, and other tasks such as handling requests by the web server is done in other tasks. Therefore, since the microcontroller that I was using has more than one core, it is possible to run the main Rust code in parallel with the code related to the web server handlers. Thus,to prevent data race, a Mutex can be used for all operations that need to work with the file system. In the next step, we create a mutex with the LittleFS handle behind it.
+At the beginning of the program, we launch the file system. This setup will format the LittleFS partition for the first time and only mounts it the next time.
+The Rust program is executed as a Task in the FreeRTOS operating system that esp-idf uses, and other tasks such as handling requests by the web server are done in other tasks. Therefore, since the microcontroller that I was using has more than one core, it is possible to run the main Rust code in parallel with the code related to the web server handlers. Thus, to prevent data race, a Mutex can be used for all operations that need to work with the file system. In the next step, we create a mutex with the LittleFS handle behind it.
 It then finds the latest shard to store readings in and executes the RTC and power-down routines discussed earlier.
-In the next step, the wifi system is set up. In this step, Micro sets up an access point; The ssid of this access point also includes the MAC address of the micro, so when several micros are together, they can still be distinguished individually.
-After that, the web server and all its handlers are started and registered, and then the ADC micro system is started. Web server handlers are explained in more detail below.
-In the next part, after making sure that the above steps are started, the firmware version that is currently running is confirmed. This is to ensure correct OTA update. For example, if a wrong update is done through OTA and the initial setup fails or the micro is reset due to an error, because the current version is not verified, the micro will automatically go to the previous version that worked properly.
+In the next step, the wifi system is set up. In this step, Micro sets up an access point; The SSID of this access point also includes the MAC address of the micro, so when several micros are together, they can still be distinguished individually.
+After that, the web server and all its handlers are started and registered, and then the ADC microsystem is started. Web server handlers are explained in more detail below.
+In the next part, after making sure that the above steps are started, the firmware version that is currently running is confirmed. This is to ensure the correct OTA update. For example, if a wrong update is done through OTA and the initial setup fails or the micro is reset due to an error because the current version is not verified, the micro will automatically go to the previous version that worked properly.
 In the final stage, the micro enters a loop that periodically reads and aggregates the values from the sensor, and stores the aggregated values in the memory after one hour.
 
 ## Webserver
 After running the web server, the following handlers are registered in it:
-* /telemetry: the data of all shards is sent to the requester in binary form and in http chunk format.
+* /telemetry: the data of all shards are sent to the requester in binary form and in HTTP chunk format.
 * /powerloss_log: All data related to power loss is sent to the requester.
-* /time: The new clock is received in unix epoch time format and RTC is set with it.
+* /time: The new clock is received in UNIX epoch time format and RTC is set with it.
 * /token: if the request is a GET, the current token is sent, and if it is a POST, the sent token is stored in the current token array. The use of the token is explained below.
 * /reset: All information except time is erased from the memory.
-* /ota: The data related to the new version of the program is received as a chunk and placed in the next OTA partition. If the binary file is received correctly, the new partition will be set as a bootable partition in the OTA header. OTA update happens only when the received version is higher than the current version.
+* /ota: The data concerning to the new version of the program is received as a chunk and placed in the next OTA partition. If the binary file is received correctly, the new partition will be set as a bootable partition in the OTA header. OTA update happens only when the received version is higher than the current version.
 * /version: Sends the current version to the requester.
 
 # Flash memory partitioning
@@ -137,15 +138,15 @@ ota_1, app, ota_1, , 1M, 1M
 littlefs, data, spiffs, , 0x1e0000,1.9M
 ```
 As you can see, two partitions are considered for OTA; Each time a new program is downloaded as a binary file, one of the OTA partitions is used. The otadata partition specifies which partition the bootloader should run from during boot.
-nvs partition is used for wifi and phy_init partition is used for physical layer and radio. Finally, the littlefs partition corresponds to the littlefs file system where data is stored. [[5]](#5)
+nvs partition is used for wifi and phy_init partition is used for the physical layer and radio. Finally, the littlefs partition corresponds to the littlefs file system where data is stored. [[5]](#5)
 
 # Thingsboard platform
-Thingsboard is one of the most famous Internet of Things platforms that is completely open source and is used all over the world. Installation and commissioning of Thingsboard server was done through docker on a VM created in proxmox.
+Thingsboard is one of the most famous Internet of Things platforms that is completely open source and is used all over the world. Installation and commissioning of Thingsboard server were done through docker on a VM created in proxmox.
 Thingsboard can be used for:
 * Device management
 * Receive and store data that devices send
 * Process data from devices and perform various tasks based on that data, such as sending an email or running a piece of code.
-* Displaying data in different graphs
+* Displaying data on different graphs
 * Creating and launching firmware updates through OTA
 * Creating different user accounts with different access levels
 * And …
@@ -156,18 +157,18 @@ http://<server-address>/api/v1/<token>/telemetry
 Each device is also located in a profile; Profiles are used to separate and group devices that perform the same task and must be managed together. For example, when using OTA update, we can present a new version of the binary file uploaded to the server to all devices that are in a profile, or when drawing a graph, we can display the data of all devices that are in a specific profile. [[4]](#4)[[8]](#8)
 
 # Thingsboard Flutter mobile app
-Thingsboard also has a mobile app written with the flutter framework called [thingsboard_flutter](https://github.com/thingsboard/flutter_thingsboard_app), which allows users to view and interact with their dashboards and see graphs of device data. One of the things that was done, and we will talk about it further, is to fork this program and add the ability to collect offline data from devices and send it to the server. In the figure below, you can see a view of the added tab called collect:
+Thingsboard also has a mobile app written with the flutter framework called [thingsboard_flutter](https://github.com/thingsboard/flutter_thingsboard_app), which allows users to view and interact with their dashboards and see graphs of device data. One of the things that were done, and we will talk about it further, is to fork this program and add the ability to collect offline data from devices and send it to the server. In the figure below, you can see a view of the added tab called collect:
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/214007538-20991e23-d3e7-49b3-83df-9bf09bc33e3e.png" height="400"></p>
 
 # Scan nearby access points
-The [wifi_iot](https://github.com/flutternetwork/WiFiFlutter/tree/master/packages/wifi_iot) library is used to scan and find nearby devices. This library can return the list of all nearby APs and connect to the requested AP by giving it an ssid. By default, the ssid of all devices with `SEM-` in the beginning is displayed, and therefore it is easy to display only the APs related to the required devices from the list of all nearby APs. Finally, the user can connect to the desired AP by clicking on it.
+The [wifi_iot](https://github.com/flutternetwork/WiFiFlutter/tree/master/packages/wifi_iot) library is used to scan and find nearby devices. This library can return the list of all nearby APs and connect to the requested AP by giving it an SSID. By default, the SSID of all devices with `SEM-` in the beginning is displayed, and therefore it is easy to display only the APs related to the required devices from the list of all nearby APs. Finally, the user can connect to the desired AP by clicking on it.
 
 # Initial setup of the device
 After connecting to the device's AP and before doing anything else, three things need to be done with the device:
-* The token related to the device representation on the server should be given to the device. With this, every time the mobile application wants to get data from a device, it also gets its token and stores it in its database. To copy the token, a section has been added in the Devices tab through which users can click on the desired device and copy the corresponding token. After copying the token, it can be pasted in the field specified during the initial startup of the device.
-* Send the current time in unix epoch time format to the device to update its RTC. If you are connected to the Internet, this time is taken online, and otherwise, the time of the mobile phone itself is used.
+* The token related to the device representation on the server should be given to the device. With this, every time the mobile application wants to get data from a device, it also gets the token and stores it in its database. To copy the token, a section has been added in the Devices tab through which users can click on the desired device and copy the corresponding token. After copying the token, it can be pasted into the field specified during the initial startup of the device.
+* Send the current time in UNIX epoch time format to the device to update its RTC. If you are connected to the Internet, this time is taken online, and otherwise, the time of the mobile phone itself is used.
 * The memory of the device should be reset to make sure that no unwanted data remains in the memory.
-Finally, a record is created in the database for this device that associates the ssid of the AP we are connected to to the device token. Also, the timestamp of the last connection to this ssid is also recorded in this record. With this, for example, when scanning, we can separate all the devices that we have connected to in the last 10 minutes with a different color.
+Finally, a record is created in the database for this device that associates the SSID of the AP we are connected to to the device token. Also, the timestamp of the last connection to this SSID is also recorded in this record. With this, for example, when scanning, we can separate all the devices that we have connected to in the last 10 minutes with a different color.
 
 # Receiving data from the device
 To receive information from the device, the following procedure is performed:
@@ -184,7 +185,7 @@ To receive information from the device, the following procedure is performed:
 The ER diagram of the database used in mobile is as follows:
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009672-edab321e-04da-4634-a992-9c27f8d1c14e.png" height="400"></p>
 
-As you can see, all the devices are placed in the devices table. The token given to each device is a combination of the access token and its device profile id on the thingsboard server. So after connecting to a device, its token is first taken and placed in this table along with its ssid. This feature has been added that after connecting to the Internet and entering the All Devices section of the mobile app, the name assigned to each device on the server is added to this database; This is actually a link between a device's ssid and its name on the server, which can be used to display each device's name next to it when scanning for APs.
+As you can see, all the devices are placed in the devices table. The token given to each device is a combination of the access token and its device profile id on the thingsboard server. So after connecting to a device, its token is first taken and placed in this table along with its SSID. This feature has been added so that after connecting to the Internet and entering the All Devices section of the mobile app, the name assigned to each device on the server is added to this database; This is actually a link between a device's SSID and its name on the server, which can be used to display each device's name next to it when scanning for APs.
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009684-6d126f7b-7145-4ccc-9d2c-2a8cf6b584a9.png" height="400"></p>
 
 The last_checked field shows the time of the last time the mobile phone was connected to the device. If this time is less than ten minutes ago, when scanning for APs, the corresponding AP of the device will turn green to make it easier for the user to identify which device to connect to in the next step.
@@ -192,7 +193,7 @@ The last_checked field shows the time of the last time the mobile phone was conn
 
 # Perform OTA via mobile
 The ota table is for managing otas and their binary files. Every time the user enters the Devices tab, the mobile application automatically checks through the server whether there is a new OTA update for the devices registered in the mobile database, and if there is, it downloads it.
-OTA updates work based on device profile, and when checking for OTA, it is checked that the version on the server is greater than the version stored on the device, and if it is, the new version is downloaded and replaces the previous version.
+OTA updates work based on the device profile, and when checking for OTA, it is checked that the version on the server is greater than the version stored on the device, and if it is, the new version is downloaded and replaces the previous version.
 When connecting to the device, the program version of the device and its device profile id are taken first, and if there is a newer update file for it, the user can update the device by selecting the Update Device Firmware option.
 <p align="center"><img src="https://user-images.githubusercontent.com/57039957/214009698-a229f132-d584-4c25-af40-73bdd9fefcb8.png" height="400"></p>
 
@@ -205,7 +206,7 @@ http://<server-address>/api/v1/<token>/telemetry
 
 # Display data on the server side
 To display data on the thingsboard server, we need to design a dashboard so that the graph of all the devices that are in the SEM profile can be displayed on this dashboard. The designed charts are:
-* Pie chart to compare total energy consumption of devices
+* Pie chart to compare the total energy consumption of devices
 * Three graphs to display kwh in time intervals: hourly, daily and monthly
 * Graph of average hourly current and voltage consumption (the voltage value is constant)
 Below is an image of the designed dashboard:
