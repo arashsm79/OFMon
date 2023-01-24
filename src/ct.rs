@@ -70,8 +70,8 @@ impl CTStorage {
             .write(true)
             .create(true)
             .open("/littlefs/powerloss_log")?;
-        self.readings_shards = HashSet::new();
         self.readings_shard_counter = 1;
+        self.readings_shards = HashSet::new();
         self.find_newest_readings_shard_num()?;
         Ok(())
     }
@@ -143,6 +143,7 @@ impl CTStorage {
                     "/littlefs/ct_readings/{}",
                     self.readings_shard_counter
                 ))?;
+            self.readings_shards.insert(1);
             info!("Made sure the first shard is created.");
         }
         info!("Next shard will be: {:?}", self.readings_shard_counter);

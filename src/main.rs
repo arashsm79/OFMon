@@ -52,7 +52,7 @@ const AC_PHASE: usize = 1;
 const AC_PHASE: usize = 3;
 
 // version used for OTA
-const VERSION: u32 = 100;
+const VERSION: u32 = 102;
 
 // ADC constants
 // const ADC_BITS: u32 = 12;
@@ -62,15 +62,16 @@ const SUPPLY_VOLTAGE: f32 = 3.3;
 const NOISE_THRESHOLD: f32 = MAX_MV_ATTEN_11 as f32 / 8.0;
 
 // Periodic actions constants
-const SAVE_PERIOD_TIMEOUT: u64 = 60; // 3600 for one hour
+const SAVE_PERIOD_TIMEOUT: u64 = 3600; // 3600 for one hour
 
 // Storage constants
-const MAX_SHARD_SIZE: u64 = 64; // in bytes
-const MAX_TIME_STORAGE_SIZE: u64 = 64; // in bytes
+const MAX_SHARD_SIZE: u64 = 4096; // in bytes
+const MAX_TIME_STORAGE_SIZE: u64 = 4096; // in bytes
 const CT_READING_SIZE: usize = 30; // in bytes
 
 // Network constants
 const ACCESS_TOKEN_SIZE: usize = 56;
+const AP_PASSWORD: &str = "12345678";
 const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 fn main() -> anyhow::Result<()> {
@@ -104,7 +105,7 @@ fn main() -> anyhow::Result<()> {
 
     // SSID and password for the Wifi access point.
     let mut ap_ssid: String = String::new();
-    let ap_password: &str = "12345678";
+    let ap_password: &str = AP_PASSWORD;
     configure_access_point_ssid(&mut ap_ssid)?;
     info!("Configured AP SSID as: {}.", ap_ssid);
 
@@ -133,7 +134,7 @@ fn main() -> anyhow::Result<()> {
     let mut save_period_start = Instant::now();
     loop {
         for ct in &mut cts {
-            ct.calculate_energy(&mut powered_adc1, 200, std::time::Duration::new(3, 0))?;
+            ct.calculate_energy(&mut powered_adc1, 100, std::time::Duration::new(3, 0))?;
             ct.reading.set_time(now().as_millis() as u64);
             info!("Energy Reading: {:?}", ct.reading);
         }
