@@ -54,7 +54,7 @@ Using the first category is almost impossible due to the immaturity and lack of 
 # Software Packages Needed for Rust Development on ESP32
 In the Rust language, a crate is the smallest unit recognized by the Rust compiler. In general, crates can be considered a software package or a project.
 The following packages are used in developing Rust applications with esp-idf:
-* [embedded-hall](https://github.com/esp-rs/embedded-hal): This package contains a set of programming interfaces or traits for using HAL in embedded environments and does not include any code related to a specific microcontroller.
+* [embedded-hal](https://github.com/esp-rs/embedded-hal): This package contains a set of programming interfaces or traits for using HAL in embedded environments and does not include any code related to a specific microcontroller.
 * [esp-idf-hal](https://github.com/esp-rs/esp-idf-hal): This package is the implementation of embedded-hal for ESP32 microcontrollers through esp-idf.
 * [embedded-svc](https://github.com/esp-rs/embedded-svc): This package contains a set of programming interfaces or traits for using different services such as wifi, Bluetooth, and httpd in embedded environments and does not include any code related to a specific microcontroller.
 * [esp-idf-svc](https://github.com/esp-rs/esp-idf-svc): this package is the implementation of embedded-svc for ESP32 microcontrollers through esp-idf.
