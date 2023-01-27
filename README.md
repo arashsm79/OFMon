@@ -1,4 +1,4 @@
-# Offile-first Smart Energy Montoring
+# Offline-first Smart Energy Montoring
 > Associated mobile app available [here](https://github.com/arashsm79/OFMonMobile).
 * [Introduction](#Introduction)
 * [Rust and ESP32](#Rust-and-ESP32)
